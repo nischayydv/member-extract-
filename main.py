@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
 # ---------------- STATES ----------------
-API_ID, API_HASH, PHONE, SOURCE, TARGET, INVITE_LINK = range(6)
+API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK = range(8)
 
 # ---------------- DATA FILES ----------------
 USER_DATA_FILE = 'user_data.json'
@@ -41,7 +41,30 @@ def load_json_file(filename, default=None):
             with open(filename, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except Exception as e:
-        logger.error(f"Error loading {filename}: {e}")
+        logger.info("🤖 Bot is starting...")
+        logger.info(f"🌐 Web dashboard available at: http://localhost:{PORT}")
+        logger.info("✅ All handlers registered")
+        
+        print("\n" + "="*60)
+        print("🤖 TELEGRAM INVITE BOT - FULLY OPERATIONAL")
+        print("="*60)
+        print(f"📱 Bot Token: {'*' * 20}{BOT_TOKEN[-10:]}")
+        print(f"🌐 Dashboard: http://localhost:{PORT}")
+        print(f"📊 Health Check: http://localhost:{PORT}/health")
+        print(f"🔴 Status: RUNNING")
+        print("="*60 + "\n")
+        
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+    except KeyboardInterrupt:
+        logger.info("⏹️ Bot stopped by user")
+        print("\n⏹️ Bot stopped gracefully")
+    except Exception as e:
+        logger.error(f"❌ Failed to start bot: {e}")
+        print(f"❌ Failed to start bot: {e}")
+
+if __name__ == '__main__':
+    main().error(f"Error loading {filename}: {e}")
     return default
 
 USER_HISTORY = load_json_file(USER_DATA_FILE, {})
@@ -49,6 +72,7 @@ STATS = load_json_file(STATS_FILE, {})
 
 # ---------------- ACTIVE TASKS ----------------
 ACTIVE_TASKS = {}
+TEMP_CLIENTS = {}  # Store temporary clients during login
 
 # ---------------- HELPER FUNCTIONS ----------------
 def save_user_history():
@@ -92,8 +116,8 @@ def get_user_settings(user_id):
         return None
     settings = USER_HISTORY[user_id].get('settings', {})
     return {
-        'min_delay': int(settings.get('min_delay', 4)),
-        'max_delay': int(settings.get('max_delay', 10)),
+        'min_delay': float(settings.get('min_delay', 4.0)),
+        'max_delay': float(settings.get('max_delay', 10.0)),
         'pause_time': int(settings.get('pause_time', 600)),
         'max_invites': int(settings.get('max_invites', 0)),
         'filter_online': bool(settings.get('filter_online', False)),
@@ -143,7 +167,7 @@ async def try_invite(client, target_entity, user):
         return False, f'error:{type(e).__name__}'
 
 async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYPE = None):
-    """Main invite task with enhanced features"""
+    """Main invite task"""
     try:
         data = USER_HISTORY.get(user_id)
         if not data:
@@ -153,8 +177,8 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
         settings = get_user_settings(user_id)
         if not settings:
             settings = {
-                'min_delay': 4,
-                'max_delay': 10,
+                'min_delay': 4.0,
+                'max_delay': 10.0,
                 'pause_time': 600,
                 'max_invites': 0,
                 'filter_online': False,
@@ -165,10 +189,10 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
         
         init_user_stats(user_id)
         
+        # File names
         session_name = f'session_{user_id}'
         sent_file = f'sent_{user_id}.txt'
         invited_file = f'invited_{user_id}.txt'
-        failed_file = f'failed_{user_id}.txt'
 
         # Task tracking
         ACTIVE_TASKS[user_id] = {
@@ -180,12 +204,28 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
             'start_time': time.time()
         }
 
-        client = TelegramClient(session_name, int(data['api_id']), data['api_hash'])
+        # Extract variables
+        api_id = int(data['api_id'])
+        api_hash = data['api_hash']
+        source_group = data['source_group']
+        target_group = data['target_group']
+        invite_link = data['invite_link']
+        min_delay = settings['min_delay']
+        max_delay = settings['max_delay']
+        pause_time = settings['pause_time']
+
+        # Create client
+        client = TelegramClient(session_name, api_id, api_hash)
         
         try:
             await client.connect()
+            
             if not await client.is_user_authorized():
-                await client.start(phone=data['phone'])
+                await update.message.reply_text("❌ Session expired. Please use /run to login again.")
+                if user_id in ACTIVE_TASKS:
+                    del ACTIVE_TASKS[user_id]
+                await client.disconnect()
+                return
             
             me = await client.get_me()
             await update.message.reply_text(f"✅ Logged in as: {me.first_name} (@{me.username or 'N/A'})")
@@ -196,138 +236,125 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
             await client.disconnect()
             return
 
-        try:
-            target_entity = await client.get_entity(data['target_group'])
-            source_entity = await client.get_entity(data['source_group'])
-            
-            await update.message.reply_text("📊 Fetching members from source group...")
-            participants = await client.get_participants(source_entity, limit=None)
-            
-            target_name = getattr(target_entity, 'title', data['target_group'])
-            await update.message.reply_text(
-                f"📋 **Task Started**\n\n"
-                f"👥 Source Members: {len(participants)}\n"
-                f"🎯 Target: {target_name}\n"
-                f"⏱️ Delay: {settings['min_delay']}-{settings['max_delay']}s\n"
-                f"{'📊 Max Invites: ' + str(settings['max_invites']) if settings['max_invites'] > 0 else '♾️ Unlimited invites'}\n\n"
-                f"Use /pause to pause\nUse /stop to stop"
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error fetching groups: {e}")
-            if user_id in ACTIVE_TASKS:
-                del ACTIVE_TASKS[user_id]
-            await client.disconnect()
-            return
+        # Main loop
+        while ACTIVE_TASKS.get(user_id, {}).get('running', False):
+            try:
+                # Load already processed users
+                already_sent = load_set(sent_file)
+                already_invited = load_set(invited_file)
 
-        # Load processed users
-        invited_set = load_set(invited_file)
-        sent_set = load_set(sent_file)
-        failed_set = load_set(failed_file)
-        
-        processed = 0
-        max_invites = settings['max_invites']
-
-        for user in participants:
-            # Check if task is stopped
-            if not ACTIVE_TASKS.get(user_id, {}).get('running', False):
-                await update.message.reply_text("⏹️ Task stopped by user.")
-                break
-
-            # Check if task is paused
-            while ACTIVE_TASKS.get(user_id, {}).get('paused', False):
-                await asyncio.sleep(2)
-
-            # Check max invites limit
-            if max_invites > 0 and ACTIVE_TASKS[user_id]['invited_count'] >= max_invites:
-                await update.message.reply_text(f"✅ Reached maximum invite limit ({max_invites})")
-                break
-
-            uid = str(getattr(user, 'id', ''))
-            if not uid or uid in invited_set or getattr(user, 'bot', False) or getattr(user, 'is_self', False):
-                continue
-
-            # Filter by online status
-            if settings['filter_online']:
-                status = getattr(user, 'status', None)
-                if not isinstance(status, (UserStatusOnline, UserStatusRecently)):
-                    continue
-
-            # Filter verified users
-            if settings['filter_verified'] and not getattr(user, 'verified', False):
-                continue
-
-            processed += 1
-            first_name = getattr(user, 'first_name', 'User') or 'User'
-            username = getattr(user, 'username', None)
-            display = f"{first_name} (@{username})" if username else first_name
-
-            # Try to invite
-            invited_ok, info = await try_invite(client, target_entity, user)
-            
-            if invited_ok:
-                append_line(invited_file, uid)
-                invited_set.add(uid)
-                ACTIVE_TASKS[user_id]['invited_count'] += 1
-                STATS[user_id]['total_invited'] += 1
+                # Get entities
+                target_entity = await client.get_entity(target_group)
+                participants = await client.get_participants(source_group)
                 
-                if processed % 5 == 0:  # Report every 5 users
-                    await update.message.reply_text(f"✅ Invited: {display} | Total: {ACTIVE_TASKS[user_id]['invited_count']}")
-                
-                await asyncio.sleep(random.uniform(settings['min_delay'], settings['max_delay']))
-                continue
-
-            # Handle errors
-            if info and info.startswith('floodwait'):
-                try:
-                    wait_time = int(info.split(':')[1])
-                    await update.message.reply_text(
-                        f"⚠️ FloodWait detected!\n"
-                        f"⏳ Waiting {wait_time} seconds..."
-                    )
-                    await asyncio.sleep(wait_time + 5)
-                    continue
-                except:
-                    await asyncio.sleep(settings['pause_time'])
-                    continue
-            
-            if info == 'peerflood':
                 await update.message.reply_text(
-                    f"⚠️ PeerFlood detected!\n"
-                    f"⏳ Pausing for {settings['pause_time']//60} minutes..."
+                    f"📋 **Task Started**\n\n"
+                    f"👥 Total members in source group: {len(participants)}\n"
+                    f"⏱️ Delay: {min_delay}-{max_delay}s\n\n"
+                    f"Use /pause to pause\nUse /stop to stop"
                 )
-                await asyncio.sleep(settings['pause_time'])
-                continue
 
-            # Try sending DM if invite failed
-            if not settings['skip_dm_on_fail'] and uid not in sent_set:
-                try:
-                    custom_msg = settings.get('custom_message')
-                    if custom_msg:
-                        text = custom_msg.replace('{name}', first_name).replace('{link}', data['invite_link'])
+                # Process each user
+                for user in participants:
+                    # Check if task is stopped or paused
+                    if not ACTIVE_TASKS.get(user_id, {}).get('running', False):
+                        await update.message.reply_text("⏹️ Task stopped by user.")
+                        break
+
+                    while ACTIVE_TASKS.get(user_id, {}).get('paused', False):
+                        await asyncio.sleep(2)
+
+                    # Get user ID
+                    uid = str(getattr(user, 'id', ''))
+                    if not uid or uid in already_invited or uid in already_sent:
+                        continue
+                    
+                    if getattr(user, 'bot', False) or getattr(user, 'is_self', False):
+                        continue
+
+                    # Display processing
+                    first_name = getattr(user, 'first_name', 'User') or 'User'
+                    username = getattr(user, 'username', '')
+                    logger.info(f"Processing: {uid} | {first_name} | @{username}")
+
+                    # Try to invite
+                    invited_ok, info = await try_invite(client, target_entity, user)
+                    
+                    if invited_ok:
+                        logger.info(f"[INVITED] {uid} ({info if info else 'success'})")
+                        append_line(invited_file, uid)
+                        already_invited.add(uid)
+                        ACTIVE_TASKS[user_id]['invited_count'] += 1
+                        STATS[user_id]['total_invited'] += 1
+                        
+                        await asyncio.sleep(random.uniform(min_delay, max_delay))
+                        continue
+
+                    # Handle FloodWait
+                    if info and info.startswith('floodwait'):
+                        try:
+                            wait_time = int(info.split(':')[1])
+                            logger.warning(f"FloodWait detected. Pausing {wait_time} seconds...")
+                            await update.message.reply_text(
+                                f"⚠️ FloodWait detected!\n⏳ Waiting {wait_time} seconds..."
+                            )
+                            await asyncio.sleep(wait_time + 5)
+                            continue
+                        except:
+                            await asyncio.sleep(pause_time)
+                            continue
+                    
+                    # Handle PeerFlood
+                    if info == 'peerflood':
+                        logger.warning(f"PeerFlood detected. Pausing {pause_time//60} minutes...")
+                        await update.message.reply_text(
+                            f"⚠️ PeerFlood detected!\n⏳ Pausing for {pause_time//60} minutes..."
+                        )
+                        await asyncio.sleep(pause_time)
+                        continue
+
+                    # Try sending DM
+                    if not settings['skip_dm_on_fail'] and uid not in already_sent:
+                        try:
+                            # Custom message or default
+                            custom_msg = settings.get('custom_message')
+                            if custom_msg:
+                                text = custom_msg.replace('{name}', first_name).replace('{link}', invite_link)
+                            else:
+                                text = f"Hi {first_name}! Join our group here: {invite_link}"
+                            
+                            await client.send_message(user.id, text)
+                            logger.info(f"[MESSAGED] {uid}")
+                            append_line(sent_file, uid)
+                            already_sent.add(uid)
+                            ACTIVE_TASKS[user_id]['dm_count'] += 1
+                            STATS[user_id]['total_dms_sent'] += 1
+                            
+                            await asyncio.sleep(random.uniform(min_delay, max_delay))
+                        except errors.UserPrivacyRestrictedError:
+                            logger.info(f"Can't DM {uid}: privacy settings.")
+                            ACTIVE_TASKS[user_id]['failed_count'] += 1
+                        except errors.FloodWaitError as e:
+                            logger.warning(f"FloodWait during DM. Pausing {pause_time//60} minutes...")
+                            await asyncio.sleep(pause_time)
+                        except errors.PeerFloodError:
+                            logger.warning("PeerFlood detected on send. Pausing...")
+                            await asyncio.sleep(pause_time)
+                        except Exception as e:
+                            logger.error(f"Failed to DM {uid}: {type(e).__name__} {e}")
+                            ACTIVE_TASKS[user_id]['failed_count'] += 1
                     else:
-                        text = f"Hi {first_name}! 👋\n\nJoin our group: {data['invite_link']}"
-                    
-                    await client.send_message(uid, text)
-                    append_line(sent_file, uid)
-                    sent_set.add(uid)
-                    ACTIVE_TASKS[user_id]['dm_count'] += 1
-                    STATS[user_id]['total_dms_sent'] += 1
-                    
-                    if processed % 5 == 0:
-                        await update.message.reply_text(f"📧 DM sent: {display}")
-                    
-                    await asyncio.sleep(random.uniform(settings['min_delay'], settings['max_delay']))
-                except Exception as e:
-                    append_line(failed_file, uid)
-                    failed_set.add(uid)
-                    ACTIVE_TASKS[user_id]['failed_count'] += 1
-                    STATS[user_id]['total_failed'] += 1
-                    logger.error(f"DM failed for {uid}: {e}")
-            else:
-                append_line(failed_file, uid)
-                failed_set.add(uid)
-                ACTIVE_TASKS[user_id]['failed_count'] += 1
-                STATS[user_id]['total_failed'] += 1
+                        ACTIVE_TASKS[user_id]['failed_count'] += 1
+
+                # Batch finished
+                logger.info("Batch finished. Restarting loop...")
+                await update.message.reply_text("✅ Batch completed. Restarting in 30 seconds...")
+                await asyncio.sleep(30)
+
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+                await update.message.reply_text(f"❌ Error: {e}\nRestarting in 60 seconds...")
+                await asyncio.sleep(60)
 
         # Task completion
         elapsed = time.time() - ACTIVE_TASKS[user_id]['start_time']
@@ -360,22 +387,26 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
 # ---------------- BOT COMMANDS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
-    user_id = str(update.effective_user.id)
     keyboard = [
         ['🚀 Start New Task', '🔄 Repeat Last Task'],
-        ['📊 Statistics', '⚙️ Settings'],
-        ['❓ Help', '📋 My Info']
+        ['📊 Statistics', '❓ Help']
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     welcome_msg = (
-        "👋 **Welcome to Advanced Invite Bot!**\n\n"
+        "👋 **Welcome to Telegram Invite Bot!**\n\n"
         "🎯 Features:\n"
         "• Bulk invite members\n"
         "• Smart DM fallback\n"
         "• Flood protection\n"
-        "• Custom settings\n"
-        "• Detailed statistics\n"
+        "• Auto-restart loop\n"
+        "• Pause/Resume support\n"
+        "• Live web dashboard\n\n"
+        "Choose an option below:":\n"
+        "• Bulk invite members\n"
+        "• Smart DM fallback\n"
+        "• Flood protection\n"
+        "• Auto-restart loop\n"
         "• Pause/Resume support\n\n"
         "Choose an option below:"
     )
@@ -392,15 +423,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "▶️ /resume - Resume paused task\n"
         "⏹️ /stop - Stop running task\n"
         "📊 /stats - View statistics\n"
-        "⚙️ /settings - Configure bot\n"
         "🗑️ /clear - Clear history\n"
-        "📋 /info - Show your info\n"
         "❌ /cancel - Cancel operation\n\n"
         "💡 **Tips:**\n"
         "• Keep delays between 4-10 seconds\n"
-        "• Use custom messages for better response\n"
         "• Monitor for flood warnings\n"
-        "• Pause if needed and resume later"
+        "• Use pause if needed\n"
+        "• Check live dashboard on web interface"
     )
     await update.message.reply_text(help_text)
 
@@ -434,43 +463,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(stats_text)
 
-async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Info command handler"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in USER_HISTORY:
-        await update.message.reply_text("❌ No data found. Use /run to start.")
-        return
-    
-    data = USER_HISTORY[user_id]
-    settings = get_user_settings(user_id)
-    
-    if not settings:
-        settings = {
-            'min_delay': 4,
-            'max_delay': 10,
-            'pause_time': 600,
-            'max_invites': 0,
-            'filter_online': False,
-            'filter_verified': False
-        }
-    
-    info_text = (
-        f"📋 **Your Configuration**\n\n"
-        f"📱 Phone: {data.get('phone', 'N/A')}\n"
-        f"📥 Source: {data.get('source_group', 'N/A')}\n"
-        f"📤 Target: {data.get('target_group', 'N/A')}\n"
-        f"🔗 Invite Link: {data.get('invite_link', 'N/A')}\n\n"
-        f"⚙️ **Settings:**\n"
-        f"⏱️ Delay: {settings['min_delay']}-{settings['max_delay']}s\n"
-        f"⏸️ Pause Time: {settings['pause_time']}s\n"
-        f"📊 Max Invites: {settings['max_invites'] if settings['max_invites'] > 0 else 'Unlimited'}\n"
-        f"🟢 Filter Online: {'Yes' if settings['filter_online'] else 'No'}\n"
-        f"✅ Filter Verified: {'Yes' if settings['filter_verified'] else 'No'}"
-    )
-    
-    await update.message.reply_text(info_text)
-
 async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pause command handler"""
     user_id = str(update.effective_user.id)
@@ -480,6 +472,7 @@ async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     ACTIVE_TASKS[user_id]['paused'] = True
+    logger.info(f"⏸️ Task paused by user {user_id}")
     await update.message.reply_text("⏸️ Task paused. Use /resume to continue.")
 
 async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -491,6 +484,7 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     ACTIVE_TASKS[user_id]['paused'] = False
+    logger.info(f"▶️ Task resumed by user {user_id}")
     await update.message.reply_text("▶️ Task resumed.")
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -502,13 +496,14 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     ACTIVE_TASKS[user_id]['running'] = False
+    logger.info(f"⏹️ Task stopped by user {user_id}")
     await update.message.reply_text("⏹️ Task stopping...")
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear history command handler"""
     user_id = str(update.effective_user.id)
     
-    files = [f'sent_{user_id}.txt', f'invited_{user_id}.txt', f'failed_{user_id}.txt']
+    files = [f'sent_{user_id}.txt', f'invited_{user_id}.txt']
     for f in files:
         try:
             if os.path.exists(f):
@@ -516,18 +511,8 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error removing {f}: {e}")
     
+    logger.info(f"🗑️ History cleared for user {user_id}")
     await update.message.reply_text("🗑️ History cleared!")
-
-async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Settings menu handler"""
-    keyboard = [
-        ['⏱️ Set Delays', '⏸️ Set Pause Time'],
-        ['📊 Set Max Invites', '💬 Custom Message'],
-        ['🟢 Toggle Online Filter', '✅ Toggle Verified Filter'],
-        ['🔙 Back to Main']
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("⚙️ **Settings Menu**\nChoose an option:", reply_markup=reply_markup)
 
 # ---------------- CONVERSATION HANDLERS ----------------
 async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -539,7 +524,7 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     
     await update.message.reply_text(
-        "🔑 **Step 1/6: API ID**\n\n"
+        "🔑 **Step 1/7: API ID**\n\n"
         "Enter your API_ID from my.telegram.org:",
         reply_markup=ReplyKeyboardRemove()
     )
@@ -549,10 +534,9 @@ async def api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle API ID input"""
     try:
         api_id_value = update.message.text.strip()
-        # Validate it's numeric
         int(api_id_value)
         context.user_data['api_id'] = api_id_value
-        await update.message.reply_text("🔐 **Step 2/6: API Hash**\n\nEnter your API_HASH:")
+        await update.message.reply_text("🔐 **Step 2/7: API Hash**\n\nEnter your API_HASH:")
         return API_HASH
     except ValueError:
         await update.message.reply_text("❌ Invalid API ID. Please enter numbers only:")
@@ -562,32 +546,165 @@ async def api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle API Hash input"""
     context.user_data['api_hash'] = update.message.text.strip()
     await update.message.reply_text(
-        "📱 **Step 3/6: Phone Number**\n\n"
+        "📱 **Step 3/7: Phone Number**\n\n"
         "Enter your phone number with country code:\n"
         "Example: +1234567890"
     )
     return PHONE
 
 async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle phone number input"""
+    """Handle phone number input and send OTP"""
     phone_number = update.message.text.strip()
     if not phone_number.startswith('+'):
         await update.message.reply_text("⚠️ Phone should start with + and country code. Try again:")
         return PHONE
     
     context.user_data['phone'] = phone_number
-    await update.message.reply_text(
-        "📥 **Step 4/6: Source Group**\n\n"
-        "Enter source group username or link:\n"
-        "Example: @groupname or https://t.me/groupname"
-    )
-    return SOURCE
+    user_id = str(update.effective_user.id)
+    
+    # Create temporary client for login
+    api_id = int(context.user_data['api_id'])
+    api_hash = context.user_data['api_hash']
+    session_name = f'session_{user_id}'
+    
+    try:
+        client = TelegramClient(session_name, api_id, api_hash)
+        await client.connect()
+        
+        # Send OTP
+        await client.send_code_request(phone_number)
+        TEMP_CLIENTS[user_id] = client
+        
+        logger.info(f"📱 OTP sent to {phone_number} for user {user_id}")
+        await update.message.reply_text(
+            "✅ **Step 4/7: OTP Code**\n\n"
+            "An OTP has been sent to your Telegram account.\n"
+            "Please enter the OTP code:"
+        )
+        return OTP_CODE
+    except Exception as e:
+        logger.error(f"Error sending OTP: {e}")
+        await update.message.reply_text(f"❌ Error sending OTP: {e}\n\nPlease try again with /run")
+        if user_id in TEMP_CLIENTS:
+            try:
+                await TEMP_CLIENTS[user_id].disconnect()
+            except:
+                pass
+            del TEMP_CLIENTS[user_id]
+        return ConversationHandler.END
+
+async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle OTP code input"""
+    user_id = str(update.effective_user.id)
+    otp = update.message.text.strip()
+    
+    if user_id not in TEMP_CLIENTS:
+        await update.message.reply_text("❌ Session expired. Please start again with /run")
+        return ConversationHandler.END
+    
+    client = TEMP_CLIENTS[user_id]
+    phone_number = context.user_data['phone']
+    
+    try:
+        await client.sign_in(phone_number, otp)
+        
+        # Check if logged in successfully
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            logger.info(f"✅ User {user_id} logged in successfully as {me.first_name}")
+            await update.message.reply_text(
+                f"✅ Login successful!\n\n"
+                f"Logged in as: {me.first_name} (@{me.username or 'N/A'})\n\n"
+                f"📥 **Step 5/7: Source Group**\n\n"
+                f"Enter source group username or link:\n"
+                f"Example: @groupname or https://t.me/groupname"
+            )
+            
+            # Disconnect temp client
+            await client.disconnect()
+            if user_id in TEMP_CLIENTS:
+                del TEMP_CLIENTS[user_id]
+            
+            return SOURCE
+        else:
+            await update.message.reply_text("❌ Login failed. Please try again with /run")
+            await client.disconnect()
+            if user_id in TEMP_CLIENTS:
+                del TEMP_CLIENTS[user_id]
+            return ConversationHandler.END
+            
+    except errors.SessionPasswordNeededError:
+        # Two-factor authentication required
+        await update.message.reply_text(
+            "🔐 **Step 4.5/7: 2FA Password**\n\n"
+            "Your account has 2FA enabled.\n"
+            "Please enter your 2FA password:"
+        )
+        return TWO_FA_PASSWORD
+    except errors.PhoneCodeInvalidError:
+        await update.message.reply_text("❌ Invalid OTP code. Please try again:")
+        return OTP_CODE
+    except Exception as e:
+        logger.error(f"Error during sign in: {e}")
+        await update.message.reply_text(f"❌ Error: {e}\n\nPlease try again with /run")
+        await client.disconnect()
+        if user_id in TEMP_CLIENTS:
+            del TEMP_CLIENTS[user_id]
+        return ConversationHandler.END
+
+async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 2FA password input"""
+    user_id = str(update.effective_user.id)
+    password = update.message.text.strip()
+    
+    if user_id not in TEMP_CLIENTS:
+        await update.message.reply_text("❌ Session expired. Please start again with /run")
+        return ConversationHandler.END
+    
+    client = TEMP_CLIENTS[user_id]
+    
+    try:
+        await client.sign_in(password=password)
+        
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            logger.info(f"✅ User {user_id} logged in successfully with 2FA")
+            await update.message.reply_text(
+                f"✅ Login successful!\n\n"
+                f"Logged in as: {me.first_name} (@{me.username or 'N/A'})\n\n"
+                f"📥 **Step 5/7: Source Group**\n\n"
+                f"Enter source group username or link:\n"
+                f"Example: @groupname or https://t.me/groupname"
+            )
+            
+            await client.disconnect()
+            if user_id in TEMP_CLIENTS:
+                del TEMP_CLIENTS[user_id]
+            
+            return SOURCE
+        else:
+            await update.message.reply_text("❌ Login failed. Please try again with /run")
+            await client.disconnect()
+            if user_id in TEMP_CLIENTS:
+                del TEMP_CLIENTS[user_id]
+            return ConversationHandler.END
+            
+    except errors.PasswordHashInvalidError:
+        await update.message.reply_text("❌ Invalid 2FA password. Please try again:")
+        return TWO_FA_PASSWORD
+    except Exception as e:
+        logger.error(f"Error with 2FA: {e}")
+        await update.message.reply_text(f"❌ Error: {e}\n\nPlease try again with /run")
+        await client.disconnect()
+        if user_id in TEMP_CLIENTS:
+            del TEMP_CLIENTS[user_id]
+        return ConversationHandler.END
 
 async def source(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle source group input"""
     context.user_data['source_group'] = update.message.text.strip()
     await update.message.reply_text(
-        "📤 **Step 5/6: Target Group**\n\n"
+        "📤 **Step 6/7: Target Group**\n\n"
         "Enter target group username or link:"
     )
     return TARGET
@@ -596,46 +713,43 @@ async def target(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle target group input"""
     context.user_data['target_group'] = update.message.text.strip()
     await update.message.reply_text(
-        "🔗 **Step 6/6: Invite Link**\n\n"
+        "🔗 **Step 7/7: Invite Link**\n\n"
         "Enter the invite link for your target group:"
     )
     return INVITE_LINK
 
-async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def invite_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle invite link input and start task"""
     context.user_data['invite_link'] = update.message.text.strip()
     user_id = str(update.effective_user.id)
 
-    # Initialize settings if not exists
+    # Initialize settings
     if 'settings' not in context.user_data:
-        existing_settings = get_user_settings(user_id)
-        if existing_settings:
-            context.user_data['settings'] = existing_settings
-        else:
-            context.user_data['settings'] = {
-                'min_delay': 4,
-                'max_delay': 10,
-                'pause_time': 600,
-                'max_invites': 0,
-                'filter_online': False,
-                'filter_verified': False,
-                'skip_dm_on_fail': False,
-                'custom_message': None
-            }
+        context.user_data['settings'] = {
+            'min_delay': 4.0,
+            'max_delay': 10.0,
+            'pause_time': 600,
+            'max_invites': 0,
+            'filter_online': False,
+            'filter_verified': False,
+            'skip_dm_on_fail': False,
+            'custom_message': None
+        }
 
     USER_HISTORY[user_id] = dict(context.user_data)
     save_user_history()
 
-    keyboard = [['🚀 Start Task', '📋 Main Menu']]
+    keyboard = [['📋 Main Menu']]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+    logger.info(f"✅ Configuration saved for user {user_id}")
     await update.message.reply_text(
         "✅ **Configuration Saved!**\n\n"
-        "Ready to start the invite task.",
+        "Starting invite task...",
         reply_markup=reply_markup
     )
     
-    # Start task automatically
+    # Start task
     asyncio.create_task(invite_task(user_id, update, context))
     return ConversationHandler.END
 
@@ -651,52 +765,51 @@ async def rerun(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ A task is already running!")
         return
     
+    logger.info(f"🔄 Rerunning task for user {user_id}")
     await update.message.reply_text("🔄 Rerunning your last task...")
     asyncio.create_task(invite_task(user_id, update, context))
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel conversation"""
+    user_id = str(update.effective_user.id)
+    
+    # Clean up temp client if exists
+    if user_id in TEMP_CLIENTS:
+        try:
+            await TEMP_CLIENTS[user_id].disconnect()
+        except:
+            pass
+        del TEMP_CLIENTS[user_id]
+    
     await update.message.reply_text(
         "❌ Operation cancelled.",
         reply_markup=ReplyKeyboardMarkup([['📋 Main Menu']], resize_keyboard=True)
     )
     return ConversationHandler.END
 
-# Message handler for keyboard buttons
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle keyboard button presses"""
     text = update.message.text
     
-    if text == '🚀 Start New Task' or text == '🚀 Start Task':
+    if text == '🚀 Start New Task':
         return await run_command(update, context)
     elif text == '🔄 Repeat Last Task':
         return await rerun(update, context)
     elif text == '📊 Statistics':
         return await stats_command(update, context)
-    elif text == '⚙️ Settings':
-        return await settings_menu(update, context)
     elif text == '❓ Help':
         return await help_command(update, context)
-    elif text == '📋 My Info' or text == '📋 Main Menu':
-        return await start(update, context)
-    elif text == '🔙 Back to Main':
-        return await start(update, context)
-    else:
-        # Unknown button
+    elif text == '📋 Main Menu':
         return await start(update, context)
 
-# ---------------- ERROR HANDLER ----------------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     logger.error(f"Exception while handling an update: {context.error}")
-    
-    if isinstance(update, Update) and update.effective_message:
-        try:
-            await update.effective_message.reply_text(
-                "❌ An error occurred. Please try again or contact support."
-            )
-        except:
-            pass
+
+# ---------------- FLASK SERVER THREAD ----------------
+def run_flask():
+    """Run Flask server in separate thread"""
+    app.run(host='0.0.0.0', port=PORT, threaded=True)
 
 # ---------------- BOT SETUP ----------------
 def main():
@@ -708,51 +821,44 @@ def main():
         return
 
     try:
-        # Create conversation handler
+        # Start Flask server in background thread
+        flask_thread = Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        logger.info(f"🌐 Web dashboard started on port {PORT}")
+        
+        # Setup conversation handler with OTP support
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('run', run_command)],
             states={
                 API_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, api_id)],
                 API_HASH: [MessageHandler(filters.TEXT & ~filters.COMMAND, api_hash)],
                 PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone)],
+                OTP_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, otp_code)],
+                TWO_FA_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, two_fa_password)],
                 SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, source)],
                 TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, target)],
-                INVITE_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, invite_link)]
+                INVITE_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, invite_link_handler)]
             },
             fallbacks=[CommandHandler('cancel', cancel)],
         )
 
-        # Build application
         application = ApplicationBuilder().token(BOT_TOKEN).build()
         
-        # Add handlers
         application.add_handler(CommandHandler('start', start))
         application.add_handler(CommandHandler('help', help_command))
         application.add_handler(CommandHandler('rerun', rerun))
         application.add_handler(CommandHandler('stats', stats_command))
-        application.add_handler(CommandHandler('info', info_command))
         application.add_handler(CommandHandler('pause', pause_command))
         application.add_handler(CommandHandler('resume', resume_command))
         application.add_handler(CommandHandler('stop', stop_command))
         application.add_handler(CommandHandler('clear', clear_command))
-        application.add_handler(CommandHandler('settings', settings_menu))
         application.add_handler(conv_handler)
-        
-        # Button handler (must be last)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
-        
-        # Error handler
         application.add_error_handler(error_handler)
 
-        # Start bot
-        logger.info("🤖 Bot is running on Render...")
-        print("🤖 Bot is running on Render...")
-        print("✅ Press Ctrl+C to stop")
-        
-        application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
-        )
+        logger.info("🤖 Bot is starting...")
+        logger.info(f"🌐 Access web dashboard at: http://localhost:{PORT}")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
@@ -760,3 +866,18 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Help command handler"""
+    help_text = (
+        "📚 **Command Guide**\n\n"
+        "🚀 /run - Start new invite task\n"
+        "🔄 /rerun - Repeat last task\n"
+        "⏸️ /pause - Pause running task\n"
+        "▶️ /resume - Resume paused task\n"
+        "⏹️ /stop - Stop running task\n"
+        "📊 /stats - View statistics\n"
+        "🗑️ /clear - Clear history\n"
+        "❌ /cancel - Cancel operation\n\n"
+        "💡 **Tips:**\n"
+        "• Keep delays between 4-10 seconds\n
