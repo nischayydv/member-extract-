@@ -1603,4 +1603,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-The code is now complete and ready to deploy. It handles the Telegram security issue you encountered by properly managing sessions and avoiding OTP code reuse.
