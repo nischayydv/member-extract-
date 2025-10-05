@@ -5,14 +5,39 @@ import random
 import time
 import logging
 from datetime import datetime
+from threading import Thread
+from queue import Queue
 from telethon import TelegramClient, errors
 from telethon.tl.functions.channels import InviteToChannelRequest
-from telethon.tl.types import UserStatusOnline, UserStatusOffline, UserStatusRecently
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ConversationHandler, 
+    Application, CommandHandler, ConversationHandler, 
     MessageHandler, filters, ContextTypes
 )
+from flask import Flask, render_template_string, jsonify, Response
+import queue
+
+# ---------------- FLASK APP SETUP ----------------
+app = Flask(__name__)
+LOG_QUEUE = Queue(maxsize=1000)
+
+# ---------------- CUSTOM LOG HANDLER ----------------
+class QueueHandler(logging.Handler):
+    """Custom handler to push logs to queue"""
+    def emit(self, record):
+        log_entry = {
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'level': record.levelname,
+            'message': self.format(record)
+        }
+        try:
+            LOG_QUEUE.put_nowait(log_entry)
+        except queue.Full:
+            try:
+                LOG_QUEUE.get_nowait()
+                LOG_QUEUE.put_nowait(log_entry)
+            except:
+                pass
 
 # ---------------- LOGGING SETUP ----------------
 logging.basicConfig(
@@ -21,8 +46,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Add queue handler
+queue_handler = QueueHandler()
+queue_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+logging.getLogger().addHandler(queue_handler)
+
 # ---------------- TELEGRAM BOT TOKEN ----------------
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
+PORT = int(os.environ.get('PORT', 10000))
 
 # ---------------- STATES ----------------
 API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK = range(8)
@@ -41,30 +72,7 @@ def load_json_file(filename, default=None):
             with open(filename, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except Exception as e:
-        logger.info("🤖 Bot is starting...")
-        logger.info(f"🌐 Web dashboard available at: http://localhost:{PORT}")
-        logger.info("✅ All handlers registered")
-        
-        print("\n" + "="*60)
-        print("🤖 TELEGRAM INVITE BOT - FULLY OPERATIONAL")
-        print("="*60)
-        print(f"📱 Bot Token: {'*' * 20}{BOT_TOKEN[-10:]}")
-        print(f"🌐 Dashboard: http://localhost:{PORT}")
-        print(f"📊 Health Check: http://localhost:{PORT}/health")
-        print(f"🔴 Status: RUNNING")
-        print("="*60 + "\n")
-        
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-        
-    except KeyboardInterrupt:
-        logger.info("⏹️ Bot stopped by user")
-        print("\n⏹️ Bot stopped gracefully")
-    except Exception as e:
-        logger.error(f"❌ Failed to start bot: {e}")
-        print(f"❌ Failed to start bot: {e}")
-
-if __name__ == '__main__':
-    main().error(f"Error loading {filename}: {e}")
+        logger.error(f"Error loading {filename}: {e}")
     return default
 
 USER_HISTORY = load_json_file(USER_DATA_FILE, {})
@@ -72,7 +80,476 @@ STATS = load_json_file(STATS_FILE, {})
 
 # ---------------- ACTIVE TASKS ----------------
 ACTIVE_TASKS = {}
-TEMP_CLIENTS = {}  # Store temporary clients during login
+TEMP_CLIENTS = {}
+
+# ---------------- HTML TEMPLATE ----------------
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Telegram Invite Bot - Live Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .header h1 {
+            color: #667eea;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        .header p {
+            color: #6b7280;
+            margin: 10px 0;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 10px 25px;
+            border-radius: 25px;
+            font-weight: bold;
+            font-size: 1em;
+            margin-top: 10px;
+        }
+        .status-running {
+            background: #10b981;
+            color: white;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .status-idle {
+            background: #6b7280;
+            color: white;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: white;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+            text-align: center;
+            transition: transform 0.3s;
+        }
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+        .stat-card h3 {
+            color: #6b7280;
+            font-size: 0.9em;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .stat-card .value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #667eea;
+        }
+        .stat-card .icon {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+        .task-details {
+            background: white;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .task-details h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+        }
+        .task-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .task-info-item {
+            padding: 15px;
+            background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+        .task-info-item strong {
+            color: #4b5563;
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+        }
+        .task-info-item span {
+            color: #1f2937;
+            font-size: 1.1em;
+            font-weight: 600;
+        }
+        .logs-container {
+            background: #1e293b;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        .logs-header {
+            color: #94a3b8;
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #334155;
+        }
+        .log-entry {
+            font-family: 'Courier New', monospace;
+            padding: 10px 12px;
+            margin: 5px 0;
+            border-radius: 8px;
+            font-size: 0.85em;
+            animation: fadeIn 0.3s;
+            line-height: 1.5;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .log-INFO {
+            background: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%);
+            color: #dbeafe;
+            border-left: 4px solid #3b82f6;
+        }
+        .log-WARNING {
+            background: linear-gradient(135deg, #b45309 0%, #92400e 100%);
+            color: #fef3c7;
+            border-left: 4px solid #f59e0b;
+        }
+        .log-ERROR {
+            background: linear-gradient(135deg, #991b1b 0%, #7f1d1d 100%);
+            color: #fee2e2;
+            border-left: 4px solid #ef4444;
+        }
+        .log-time {
+            color: #94a3b8;
+            margin-right: 10px;
+            font-weight: bold;
+        }
+        .clear-btn {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9em;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        .clear-btn:hover {
+            background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+            transform: scale(1.05);
+        }
+        .auto-scroll-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9em;
+            font-weight: 600;
+            margin-right: 10px;
+            transition: all 0.3s;
+        }
+        .auto-scroll-btn:hover {
+            transform: scale(1.05);
+        }
+        ::-webkit-scrollbar {
+            width: 10px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0f172a;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: linear-gradient(135deg, #475569 0%, #334155 100%);
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(135deg, #64748b 0%, #475569 100%);
+        }
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 1.8em;
+            }
+            .grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .task-info {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Telegram Invite Bot</h1>
+            <p>Real-Time Status Dashboard & Live Monitoring</p>
+            <span id="status-badge" class="status-badge status-idle">IDLE</span>
+        </div>
+
+        <div class="grid">
+            <div class="stat-card">
+                <div class="icon">Active</div>
+                <h3>Active Tasks</h3>
+                <div class="value" id="active-tasks">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="icon">Invited</div>
+                <h3>Total Invited</h3>
+                <div class="value" id="total-invited">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="icon">DMs</div>
+                <h3>DMs Sent</h3>
+                <div class="value" id="total-dms">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="icon">Failed</div>
+                <h3>Failed</h3>
+                <div class="value" id="total-failed">0</div>
+            </div>
+        </div>
+
+        <div id="task-details-container"></div>
+
+        <div class="logs-container">
+            <div class="logs-header">
+                <span>Live Logs Stream</span>
+                <div>
+                    <button class="auto-scroll-btn" id="auto-scroll-btn" onclick="toggleAutoScroll()">
+                        Auto-Scroll: ON
+                    </button>
+                    <button class="clear-btn" onclick="clearLogs()">Clear</button>
+                </div>
+            </div>
+            <div id="logs"></div>
+        </div>
+    </div>
+
+    <script>
+        let logs = [];
+        const maxLogs = 500;
+        let autoScroll = true;
+
+        function toggleAutoScroll() {
+            autoScroll = !autoScroll;
+            const btn = document.getElementById('auto-scroll-btn');
+            btn.textContent = autoScroll ? 'Auto-Scroll: ON' : 'Auto-Scroll: OFF';
+        }
+
+        function updateStatus() {
+            fetch('/api/status')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('active-tasks').textContent = data.active_tasks;
+                    document.getElementById('total-invited').textContent = data.total_invited;
+                    document.getElementById('total-dms').textContent = data.total_dms;
+                    document.getElementById('total-failed').textContent = data.total_failed;
+
+                    const badge = document.getElementById('status-badge');
+                    if (data.active_tasks > 0) {
+                        badge.className = 'status-badge status-running';
+                        badge.textContent = 'RUNNING (' + data.active_tasks + ')';
+                    } else {
+                        badge.className = 'status-badge status-idle';
+                        badge.textContent = 'IDLE';
+                    }
+
+                    const container = document.getElementById('task-details-container');
+                    if (data.tasks && data.tasks.length > 0) {
+                        let html = '<div class="task-details"><h2>Active Tasks Details</h2>';
+                        data.tasks.forEach((task, index) => {
+                            html += `
+                                <div style="margin-bottom: 20px; padding: 15px; background: #f9fafb; border-radius: 10px;">
+                                    <h3 style="color: #667eea; margin-bottom: 10px;">Task #${index + 1} - User: ${task.user_id}</h3>
+                                    <div class="task-info">
+                                        <div class="task-info-item">
+                                            <strong>Invited</strong>
+                                            <span>${task.invited_count}</span>
+                                        </div>
+                                        <div class="task-info-item">
+                                            <strong>DMs Sent</strong>
+                                            <span>${task.dm_count}</span>
+                                        </div>
+                                        <div class="task-info-item">
+                                            <strong>Failed</strong>
+                                            <span>${task.failed_count}</span>
+                                        </div>
+                                        <div class="task-info-item">
+                                            <strong>Runtime</strong>
+                                            <span>${task.runtime}</span>
+                                        </div>
+                                        <div class="task-info-item">
+                                            <strong>Status</strong>
+                                            <span>${task.paused ? 'Paused' : 'Running'}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                        html += '</div>';
+                        container.innerHTML = html;
+                    } else {
+                        container.innerHTML = '';
+                    }
+                })
+                .catch(err => console.error('Status update error:', err));
+        }
+
+        function streamLogs() {
+            const eventSource = new EventSource('/api/logs/stream');
+            const logsDiv = document.getElementById('logs');
+
+            eventSource.onmessage = function(event) {
+                try {
+                    const log = JSON.parse(event.data);
+                    logs.push(log);
+                    
+                    if (logs.length > maxLogs) {
+                        logs.shift();
+                    }
+
+                    const logEntry = document.createElement('div');
+                    logEntry.className = `log-entry log-${log.level}`;
+                    logEntry.innerHTML = `<span class="log-time">[${log.time}]</span>${log.message}`;
+                    
+                    logsDiv.appendChild(logEntry);
+                    
+                    if (autoScroll) {
+                        logsDiv.scrollTop = logsDiv.scrollHeight;
+                    }
+
+                    if (logsDiv.children.length > maxLogs) {
+                        logsDiv.removeChild(logsDiv.firstChild);
+                    }
+                } catch (e) {
+                    console.error('Log parse error:', e);
+                }
+            };
+
+            eventSource.onerror = function() {
+                console.log('EventSource error, reconnecting in 3s...');
+                eventSource.close();
+                setTimeout(() => streamLogs(), 3000);
+            };
+        }
+
+        function clearLogs() {
+            document.getElementById('logs').innerHTML = '';
+            logs = [];
+        }
+
+        // Initialize
+        updateStatus();
+        streamLogs();
+        setInterval(updateStatus, 2000);
+    </script>
+</body>
+</html>
+"""
+
+# ---------------- FLASK ROUTES ----------------
+@app.route('/')
+def index():
+    """Main dashboard page"""
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/status')
+def api_status():
+    """API endpoint for status"""
+    total_invited = 0
+    total_dms = 0
+    total_failed = 0
+    tasks_list = []
+
+    for user_id, task in ACTIVE_TASKS.items():
+        total_invited += task.get('invited_count', 0)
+        total_dms += task.get('dm_count', 0)
+        total_failed += task.get('failed_count', 0)
+        
+        runtime = int(time.time() - task.get('start_time', time.time()))
+        tasks_list.append({
+            'user_id': user_id,
+            'invited_count': task.get('invited_count', 0),
+            'dm_count': task.get('dm_count', 0),
+            'failed_count': task.get('failed_count', 0),
+            'paused': task.get('paused', False),
+            'runtime': f"{runtime//60}m {runtime%60}s"
+        })
+
+    return jsonify({
+        'active_tasks': len(ACTIVE_TASKS),
+        'total_invited': total_invited,
+        'total_dms': total_dms,
+        'total_failed': total_failed,
+        'tasks': tasks_list
+    })
+
+@app.route('/api/logs/stream')
+def logs_stream():
+    """SSE endpoint for live logs"""
+    def generate():
+        while True:
+            try:
+                log = LOG_QUEUE.get(timeout=30)
+                yield f"data: {json.dumps(log)}\n\n"
+            except queue.Empty:
+                yield f"data: {json.dumps({'time': datetime.now().strftime('%H:%M:%S'), 'level': 'INFO', 'message': 'Waiting for logs...'})}\n\n"
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                break
+    
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/health')
+def health():
+    """Health check endpoint for Render"""
+    return jsonify({
+        'status': 'healthy',
+        'active_tasks': len(ACTIVE_TASKS),
+        'timestamp': datetime.now().isoformat()
+    })
 
 # ---------------- HELPER FUNCTIONS ----------------
 def save_user_history():
@@ -80,6 +557,7 @@ def save_user_history():
     try:
         with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(USER_HISTORY, f, indent=2, ensure_ascii=False)
+        logger.info("User history saved")
     except Exception as e:
         logger.error(f"Error saving user history: {e}")
 
@@ -88,6 +566,7 @@ def save_stats():
     try:
         with open(STATS_FILE, 'w', encoding='utf-8') as f:
             json.dump(STATS, f, indent=2, ensure_ascii=False)
+        logger.info("Stats saved")
     except Exception as e:
         logger.error(f"Error saving stats: {e}")
 
@@ -171,7 +650,7 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         data = USER_HISTORY.get(user_id)
         if not data:
-            await update.message.reply_text("❌ No configuration found. Use /run first.")
+            await update.message.reply_text("No configuration found. Use /run first.")
             return
 
         settings = get_user_settings(user_id)
@@ -221,16 +700,18 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
             await client.connect()
             
             if not await client.is_user_authorized():
-                await update.message.reply_text("❌ Session expired. Please use /run to login again.")
+                await update.message.reply_text("Session expired. Please use /run to login again.")
                 if user_id in ACTIVE_TASKS:
                     del ACTIVE_TASKS[user_id]
                 await client.disconnect()
                 return
             
             me = await client.get_me()
-            await update.message.reply_text(f"✅ Logged in as: {me.first_name} (@{me.username or 'N/A'})")
+            logger.info(f"User {user_id} logged in as: {me.first_name} (@{me.username or 'N/A'})")
+            await update.message.reply_text(f"Logged in as: {me.first_name} (@{me.username or 'N/A'})")
         except Exception as e:
-            await update.message.reply_text(f"❌ Login failed: {e}")
+            logger.error(f"Login failed for user {user_id}: {e}")
+            await update.message.reply_text(f"Login failed: {e}")
             if user_id in ACTIVE_TASKS:
                 del ACTIVE_TASKS[user_id]
             await client.disconnect()
@@ -247,18 +728,22 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
                 target_entity = await client.get_entity(target_group)
                 participants = await client.get_participants(source_group)
                 
+                logger.info(f"Task started for user {user_id} | {len(participants)} members in source")
                 await update.message.reply_text(
-                    f"📋 **Task Started**\n\n"
-                    f"👥 Total members in source group: {len(participants)}\n"
-                    f"⏱️ Delay: {min_delay}-{max_delay}s\n\n"
-                    f"Use /pause to pause\nUse /stop to stop"
+                    f"Task Started\n\n"
+                    f"Total members: {len(participants)}\n"
+                    f"Delay: {min_delay}-{max_delay}s\n"
+                    f"Source: {source_group}\n"
+                    f"Target: {target_group}\n\n"
+                    f"Use /pause to pause | /stop to stop"
                 )
 
                 # Process each user
                 for user in participants:
                     # Check if task is stopped or paused
                     if not ACTIVE_TASKS.get(user_id, {}).get('running', False):
-                        await update.message.reply_text("⏹️ Task stopped by user.")
+                        logger.info(f"Task stopped by user {user_id}")
+                        await update.message.reply_text("Task stopped by user.")
                         break
 
                     while ACTIVE_TASKS.get(user_id, {}).get('paused', False):
@@ -281,11 +766,12 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
                     invited_ok, info = await try_invite(client, target_entity, user)
                     
                     if invited_ok:
-                        logger.info(f"[INVITED] {uid} ({info if info else 'success'})")
+                        logger.info(f"[INVITED] {uid} - {first_name} ({info if info else 'success'})")
                         append_line(invited_file, uid)
                         already_invited.add(uid)
                         ACTIVE_TASKS[user_id]['invited_count'] += 1
                         STATS[user_id]['total_invited'] += 1
+                        save_stats()
                         
                         await asyncio.sleep(random.uniform(min_delay, max_delay))
                         continue
@@ -296,11 +782,12 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
                             wait_time = int(info.split(':')[1])
                             logger.warning(f"FloodWait detected. Pausing {wait_time} seconds...")
                             await update.message.reply_text(
-                                f"⚠️ FloodWait detected!\n⏳ Waiting {wait_time} seconds..."
+                                f"FloodWait Detected!\nWaiting {wait_time} seconds..."
                             )
                             await asyncio.sleep(wait_time + 5)
                             continue
-                        except:
+                        except Exception as e:
+                            logger.error(f"Error parsing floodwait: {e}")
                             await asyncio.sleep(pause_time)
                             continue
                     
@@ -308,7 +795,7 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
                     if info == 'peerflood':
                         logger.warning(f"PeerFlood detected. Pausing {pause_time//60} minutes...")
                         await update.message.reply_text(
-                            f"⚠️ PeerFlood detected!\n⏳ Pausing for {pause_time//60} minutes..."
+                            f"PeerFlood Detected!\nPausing for {pause_time//60} minutes..."
                         )
                         await asyncio.sleep(pause_time)
                         continue
@@ -324,36 +811,40 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
                                 text = f"Hi {first_name}! Join our group here: {invite_link}"
                             
                             await client.send_message(user.id, text)
-                            logger.info(f"[MESSAGED] {uid}")
+                            logger.info(f"[MESSAGED] {uid} - {first_name}")
                             append_line(sent_file, uid)
                             already_sent.add(uid)
                             ACTIVE_TASKS[user_id]['dm_count'] += 1
                             STATS[user_id]['total_dms_sent'] += 1
+                            save_stats()
                             
                             await asyncio.sleep(random.uniform(min_delay, max_delay))
                         except errors.UserPrivacyRestrictedError:
                             logger.info(f"Can't DM {uid}: privacy settings.")
                             ACTIVE_TASKS[user_id]['failed_count'] += 1
+                            STATS[user_id]['total_failed'] += 1
                         except errors.FloodWaitError as e:
-                            logger.warning(f"FloodWait during DM. Pausing {pause_time//60} minutes...")
-                            await asyncio.sleep(pause_time)
+                            logger.warning(f"FloodWait during DM. Pausing {e.seconds} seconds...")
+                            await asyncio.sleep(e.seconds + 5)
                         except errors.PeerFloodError:
                             logger.warning("PeerFlood detected on send. Pausing...")
                             await asyncio.sleep(pause_time)
                         except Exception as e:
                             logger.error(f"Failed to DM {uid}: {type(e).__name__} {e}")
                             ACTIVE_TASKS[user_id]['failed_count'] += 1
+                            STATS[user_id]['total_failed'] += 1
                     else:
                         ACTIVE_TASKS[user_id]['failed_count'] += 1
+                        STATS[user_id]['total_failed'] += 1
 
                 # Batch finished
-                logger.info("Batch finished. Restarting loop...")
-                await update.message.reply_text("✅ Batch completed. Restarting in 30 seconds...")
+                logger.info("Batch finished. Restarting loop in 30 seconds...")
+                await update.message.reply_text("Batch completed. Restarting in 30 seconds...")
                 await asyncio.sleep(30)
 
             except Exception as e:
                 logger.error(f"Error in main loop: {e}")
-                await update.message.reply_text(f"❌ Error: {e}\nRestarting in 60 seconds...")
+                await update.message.reply_text(f"Error: {e}\nRestarting in 60 seconds...")
                 await asyncio.sleep(60)
 
         # Task completion
@@ -362,12 +853,13 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
         STATS[user_id]['last_run'] = datetime.now().isoformat()
         save_stats()
 
+        logger.info(f"Task completed for user {user_id}")
         await update.message.reply_text(
-            f"🎉 **Task Completed!**\n\n"
-            f"✅ Invited: {ACTIVE_TASKS[user_id]['invited_count']}\n"
-            f"📧 DMs Sent: {ACTIVE_TASKS[user_id]['dm_count']}\n"
-            f"❌ Failed: {ACTIVE_TASKS[user_id]['failed_count']}\n"
-            f"⏱️ Time: {int(elapsed//60)}m {int(elapsed%60)}s\n\n"
+            f"Task Completed!\n\n"
+            f"Invited: {ACTIVE_TASKS[user_id]['invited_count']}\n"
+            f"DMs Sent: {ACTIVE_TASKS[user_id]['dm_count']}\n"
+            f"Failed: {ACTIVE_TASKS[user_id]['failed_count']}\n"
+            f"Time: {int(elapsed//60)}m {int(elapsed%60)}s\n\n"
             f"Use /stats to see overall statistics"
         )
 
@@ -380,7 +872,7 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
         if user_id in ACTIVE_TASKS:
             del ACTIVE_TASKS[user_id]
         try:
-            await update.message.reply_text(f"❌ Task error: {e}")
+            await update.message.reply_text(f"Task error: {e}")
         except:
             pass
 
@@ -388,27 +880,23 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
     keyboard = [
-        ['🚀 Start New Task', '🔄 Repeat Last Task'],
-        ['📊 Statistics', '❓ Help']
+        [KeyboardButton('Start New Task'), KeyboardButton('Repeat Last Task')],
+        [KeyboardButton('Statistics'), KeyboardButton('Settings')],
+        [KeyboardButton('Help'), KeyboardButton('Dashboard')]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     welcome_msg = (
-        "👋 **Welcome to Telegram Invite Bot!**\n\n"
-        "🎯 Features:\n"
-        "• Bulk invite members\n"
-        "• Smart DM fallback\n"
-        "• Flood protection\n"
-        "• Auto-restart loop\n"
-        "• Pause/Resume support\n"
-        "• Live web dashboard\n\n"
-        "Choose an option below:":\n"
-        "• Bulk invite members\n"
-        "• Smart DM fallback\n"
-        "• Flood protection\n"
-        "• Auto-restart loop\n"
-        "• Pause/Resume support\n\n"
-        "Choose an option below:"
+        "Welcome to Telegram Invite Bot!\n\n"
+        "Features:\n"
+        "- Bulk invite members from source to target group\n"
+        "- Smart DM fallback when invite fails\n"
+        "- Intelligent flood protection\n"
+        "- Auto-restart with loop support\n"
+        "- Pause/Resume functionality\n"
+        "- Live web dashboard with real-time logs\n"
+        "- OTP and 2FA authentication support\n\n"
+        "Choose an option below to get started!"
     )
     
     await update.message.reply_text(welcome_msg, reply_markup=reply_markup)
@@ -416,20 +904,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command handler"""
     help_text = (
-        "📚 **Command Guide**\n\n"
-        "🚀 /run - Start new invite task\n"
-        "🔄 /rerun - Repeat last task\n"
-        "⏸️ /pause - Pause running task\n"
-        "▶️ /resume - Resume paused task\n"
-        "⏹️ /stop - Stop running task\n"
-        "📊 /stats - View statistics\n"
-        "🗑️ /clear - Clear history\n"
-        "❌ /cancel - Cancel operation\n\n"
-        "💡 **Tips:**\n"
-        "• Keep delays between 4-10 seconds\n"
-        "• Monitor for flood warnings\n"
-        "• Use pause if needed\n"
-        "• Check live dashboard on web interface"
+        "Command Guide\n\n"
+        "Main Commands:\n"
+        "/run - Start new invite task (with OTP login)\n"
+        "/rerun - Repeat last saved task\n"
+        "/pause - Pause currently running task\n"
+        "/resume - Resume paused task\n"
+        "/stop - Stop running task completely\n"
+        "/stats - View your statistics\n"
+        "/clear - Clear invite/DM history files\n"
+        "/cancel - Cancel current operation\n\n"
+        "Web Dashboard:\n"
+        "Access live logs and stats at your deployment URL\n\n"
+        "Best Practices:\n"
+        "- Keep delays between 4-10 seconds\n"
+        "- Monitor for flood warnings\n"
+        "- Use pause during high activity\n"
+        "- Check dashboard for real-time status\n"
+        "- Clear history periodically for fresh starts"
     )
     await update.message.reply_text(help_text)
 
@@ -442,23 +934,25 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = user_id in ACTIVE_TASKS
     
     stats_text = (
-        f"📊 **Your Statistics**\n\n"
-        f"✅ Total Invited: {stats['total_invited']}\n"
-        f"📧 Total DMs: {stats['total_dms_sent']}\n"
-        f"❌ Total Failed: {stats['total_failed']}\n"
-        f"🔄 Total Runs: {stats['total_runs']}\n"
-        f"📅 Last Run: {stats['last_run'][:10] if stats['last_run'] else 'Never'}\n"
-        f"🔴 Status: {'Running' if active else 'Idle'}\n\n"
+        f"Your Statistics\n\n"
+        f"Total Invited: {stats['total_invited']}\n"
+        f"Total DMs: {stats['total_dms_sent']}\n"
+        f"Total Failed: {stats['total_failed']}\n"
+        f"Total Runs: {stats['total_runs']}\n"
+        f"Last Run: {stats['last_run'][:16] if stats['last_run'] else 'Never'}\n"
+        f"Status: {'Running' if active else 'Idle'}\n\n"
     )
     
     if active:
         task = ACTIVE_TASKS[user_id]
+        runtime = int(time.time() - task['start_time'])
         stats_text += (
-            f"**Current Task:**\n"
-            f"✅ Invited: {task['invited_count']}\n"
-            f"📧 DMs: {task['dm_count']}\n"
-            f"❌ Failed: {task['failed_count']}\n"
-            f"⏱️ Running: {int((time.time() - task['start_time'])//60)} min"
+            f"Current Task Progress:\n"
+            f"Invited: {task['invited_count']}\n"
+            f"DMs: {task['dm_count']}\n"
+            f"Failed: {task['failed_count']}\n"
+            f"Runtime: {runtime//60}m {runtime%60}s\n"
+            f"Paused: {'Yes' if task.get('paused') else 'No'}"
         )
     
     await update.message.reply_text(stats_text)
@@ -468,51 +962,72 @@ async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     if user_id not in ACTIVE_TASKS:
-        await update.message.reply_text("❌ No active task to pause.")
+        await update.message.reply_text("No active task to pause.")
         return
     
     ACTIVE_TASKS[user_id]['paused'] = True
-    logger.info(f"⏸️ Task paused by user {user_id}")
-    await update.message.reply_text("⏸️ Task paused. Use /resume to continue.")
+    logger.info(f"Task paused by user {user_id}")
+    await update.message.reply_text("Task Paused\n\nUse /resume to continue.")
 
 async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Resume command handler"""
     user_id = str(update.effective_user.id)
     
     if user_id not in ACTIVE_TASKS:
-        await update.message.reply_text("❌ No active task to resume.")
+        await update.message.reply_text("No active task to resume.")
         return
     
     ACTIVE_TASKS[user_id]['paused'] = False
-    logger.info(f"▶️ Task resumed by user {user_id}")
-    await update.message.reply_text("▶️ Task resumed.")
+    logger.info(f"Task resumed by user {user_id}")
+    await update.message.reply_text("Task Resumed\n\nProcessing continues...")
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stop command handler"""
     user_id = str(update.effective_user.id)
     
     if user_id not in ACTIVE_TASKS:
-        await update.message.reply_text("❌ No active task to stop.")
+        await update.message.reply_text("No active task to stop.")
         return
     
     ACTIVE_TASKS[user_id]['running'] = False
-    logger.info(f"⏹️ Task stopped by user {user_id}")
-    await update.message.reply_text("⏹️ Task stopping...")
+    logger.info(f"Task stopped by user {user_id}")
+    await update.message.reply_text("Task Stopping...\n\nPlease wait...")
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear history command handler"""
     user_id = str(update.effective_user.id)
     
     files = [f'sent_{user_id}.txt', f'invited_{user_id}.txt']
+    cleared = []
+    
     for f in files:
         try:
             if os.path.exists(f):
                 os.remove(f)
+                cleared.append(f)
         except Exception as e:
             logger.error(f"Error removing {f}: {e}")
     
-    logger.info(f"🗑️ History cleared for user {user_id}")
-    await update.message.reply_text("🗑️ History cleared!")
+    logger.info(f"History cleared for user {user_id}: {cleared}")
+    await update.message.reply_text(
+        f"History Cleared!\n\n"
+        f"Removed: {len(cleared)} files\n"
+        f"You can now start fresh with /run"
+    )
+
+async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dashboard info command"""
+    await update.message.reply_text(
+        "Web Dashboard\n\n"
+        "Access your live dashboard at:\n"
+        f"http://localhost:{PORT} (local)\n\n"
+        "or at your Render deployment URL\n\n"
+        "Features:\n"
+        "- Real-time logs streaming\n"
+        "- Live task statistics\n"
+        "- Active task monitoring\n"
+        "- Auto-refresh every 2 seconds"
+    )
 
 # ---------------- CONVERSATION HANDLERS ----------------
 async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -520,12 +1035,14 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     if user_id in ACTIVE_TASKS:
-        await update.message.reply_text("⚠️ A task is already running! Use /stop first.")
+        await update.message.reply_text("A task is already running! Use /stop first.")
         return ConversationHandler.END
     
+    logger.info(f"User {user_id} started setup process")
     await update.message.reply_text(
-        "🔑 **Step 1/7: API ID**\n\n"
-        "Enter your API_ID from my.telegram.org:",
+        "Step 1/7: API ID\n\n"
+        "Get your API credentials from: https://my.telegram.org\n\n"
+        "Enter your API_ID (numbers only):",
         reply_markup=ReplyKeyboardRemove()
     )
     return API_ID
@@ -536,17 +1053,22 @@ async def api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         api_id_value = update.message.text.strip()
         int(api_id_value)
         context.user_data['api_id'] = api_id_value
-        await update.message.reply_text("🔐 **Step 2/7: API Hash**\n\nEnter your API_HASH:")
+        logger.info(f"API ID received from user")
+        await update.message.reply_text(
+            "Step 2/7: API Hash\n\n"
+            "Enter your API_HASH:"
+        )
         return API_HASH
     except ValueError:
-        await update.message.reply_text("❌ Invalid API ID. Please enter numbers only:")
+        await update.message.reply_text("Invalid API ID. Please enter numbers only:")
         return API_ID
 
 async def api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle API Hash input"""
     context.user_data['api_hash'] = update.message.text.strip()
+    logger.info(f"API Hash received from user")
     await update.message.reply_text(
-        "📱 **Step 3/7: Phone Number**\n\n"
+        "Step 3/7: Phone Number\n\n"
         "Enter your phone number with country code:\n"
         "Example: +1234567890"
     )
@@ -556,7 +1078,7 @@ async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle phone number input and send OTP"""
     phone_number = update.message.text.strip()
     if not phone_number.startswith('+'):
-        await update.message.reply_text("⚠️ Phone should start with + and country code. Try again:")
+        await update.message.reply_text("Phone should start with + and country code. Try again:")
         return PHONE
     
     context.user_data['phone'] = phone_number
@@ -568,23 +1090,29 @@ async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session_name = f'session_{user_id}'
     
     try:
+        await update.message.reply_text("Connecting to Telegram...")
         client = TelegramClient(session_name, api_id, api_hash)
         await client.connect()
         
         # Send OTP
+        await update.message.reply_text("Sending OTP code...")
         await client.send_code_request(phone_number)
         TEMP_CLIENTS[user_id] = client
         
-        logger.info(f"📱 OTP sent to {phone_number} for user {user_id}")
+        logger.info(f"OTP sent to {phone_number} for user {user_id}")
         await update.message.reply_text(
-            "✅ **Step 4/7: OTP Code**\n\n"
-            "An OTP has been sent to your Telegram account.\n"
-            "Please enter the OTP code:"
+            "Step 4/7: OTP Code\n\n"
+            "An OTP code has been sent to your Telegram account.\n"
+            "Please check your Telegram messages and enter the code here:\n\n"
+            "Format: 12345 (5-digit code)"
         )
         return OTP_CODE
     except Exception as e:
         logger.error(f"Error sending OTP: {e}")
-        await update.message.reply_text(f"❌ Error sending OTP: {e}\n\nPlease try again with /run")
+        await update.message.reply_text(
+            f"Error sending OTP: {e}\n\n"
+            f"Please check your credentials and try again with /run"
+        )
         if user_id in TEMP_CLIENTS:
             try:
                 await TEMP_CLIENTS[user_id].disconnect()
@@ -599,25 +1127,30 @@ async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     otp = update.message.text.strip()
     
     if user_id not in TEMP_CLIENTS:
-        await update.message.reply_text("❌ Session expired. Please start again with /run")
+        await update.message.reply_text("Session expired. Please start again with /run")
         return ConversationHandler.END
     
     client = TEMP_CLIENTS[user_id]
     phone_number = context.user_data['phone']
     
     try:
+        await update.message.reply_text("Verifying OTP code...")
         await client.sign_in(phone_number, otp)
         
         # Check if logged in successfully
         if await client.is_user_authorized():
             me = await client.get_me()
-            logger.info(f"✅ User {user_id} logged in successfully as {me.first_name}")
+            logger.info(f"User {user_id} logged in successfully as {me.first_name}")
             await update.message.reply_text(
-                f"✅ Login successful!\n\n"
-                f"Logged in as: {me.first_name} (@{me.username or 'N/A'})\n\n"
-                f"📥 **Step 5/7: Source Group**\n\n"
+                f"Login Successful!\n\n"
+                f"Logged in as: {me.first_name} (@{me.username or 'N/A'})\n"
+                f"User ID: {me.id}\n\n"
+                f"Step 5/7: Source Group\n\n"
                 f"Enter source group username or link:\n"
-                f"Example: @groupname or https://t.me/groupname"
+                f"Examples:\n"
+                f"- @groupname\n"
+                f"- https://t.me/groupname\n"
+                f"- t.me/groupname"
             )
             
             # Disconnect temp client
@@ -627,7 +1160,7 @@ async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             return SOURCE
         else:
-            await update.message.reply_text("❌ Login failed. Please try again with /run")
+            await update.message.reply_text("Login failed. Please try again with /run")
             await client.disconnect()
             if user_id in TEMP_CLIENTS:
                 del TEMP_CLIENTS[user_id]
@@ -635,18 +1168,28 @@ async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except errors.SessionPasswordNeededError:
         # Two-factor authentication required
+        logger.info(f"2FA required for user {user_id}")
         await update.message.reply_text(
-            "🔐 **Step 4.5/7: 2FA Password**\n\n"
-            "Your account has 2FA enabled.\n"
+            "Step 4.5/7: 2FA Password\n\n"
+            "Your account has Two-Factor Authentication enabled.\n"
             "Please enter your 2FA password:"
         )
         return TWO_FA_PASSWORD
     except errors.PhoneCodeInvalidError:
-        await update.message.reply_text("❌ Invalid OTP code. Please try again:")
+        await update.message.reply_text("Invalid OTP code. Please try again:")
         return OTP_CODE
+    except errors.PhoneCodeExpiredError:
+        await update.message.reply_text(
+            "OTP code expired.\n\n"
+            "Please start again with /run to receive a new code."
+        )
+        await client.disconnect()
+        if user_id in TEMP_CLIENTS:
+            del TEMP_CLIENTS[user_id]
+        return ConversationHandler.END
     except Exception as e:
         logger.error(f"Error during sign in: {e}")
-        await update.message.reply_text(f"❌ Error: {e}\n\nPlease try again with /run")
+        await update.message.reply_text(f"Error: {e}\n\nPlease try again with /run")
         await client.disconnect()
         if user_id in TEMP_CLIENTS:
             del TEMP_CLIENTS[user_id]
@@ -658,23 +1201,27 @@ async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text.strip()
     
     if user_id not in TEMP_CLIENTS:
-        await update.message.reply_text("❌ Session expired. Please start again with /run")
+        await update.message.reply_text("Session expired. Please start again with /run")
         return ConversationHandler.END
     
     client = TEMP_CLIENTS[user_id]
     
     try:
+        await update.message.reply_text("Verifying 2FA password...")
         await client.sign_in(password=password)
         
         if await client.is_user_authorized():
             me = await client.get_me()
-            logger.info(f"✅ User {user_id} logged in successfully with 2FA")
+            logger.info(f"User {user_id} logged in successfully with 2FA")
             await update.message.reply_text(
-                f"✅ Login successful!\n\n"
-                f"Logged in as: {me.first_name} (@{me.username or 'N/A'})\n\n"
-                f"📥 **Step 5/7: Source Group**\n\n"
+                f"Login Successful!\n\n"
+                f"Logged in as: {me.first_name} (@{me.username or 'N/A'})\n"
+                f"User ID: {me.id}\n\n"
+                f"Step 5/7: Source Group\n\n"
                 f"Enter source group username or link:\n"
-                f"Example: @groupname or https://t.me/groupname"
+                f"Examples:\n"
+                f"- @groupname\n"
+                f"- https://t.me/groupname"
             )
             
             await client.disconnect()
@@ -683,18 +1230,18 @@ async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             return SOURCE
         else:
-            await update.message.reply_text("❌ Login failed. Please try again with /run")
+            await update.message.reply_text("Login failed. Please try again with /run")
             await client.disconnect()
             if user_id in TEMP_CLIENTS:
                 del TEMP_CLIENTS[user_id]
             return ConversationHandler.END
             
     except errors.PasswordHashInvalidError:
-        await update.message.reply_text("❌ Invalid 2FA password. Please try again:")
+        await update.message.reply_text("Invalid 2FA password. Please try again:")
         return TWO_FA_PASSWORD
     except Exception as e:
         logger.error(f"Error with 2FA: {e}")
-        await update.message.reply_text(f"❌ Error: {e}\n\nPlease try again with /run")
+        await update.message.reply_text(f"Error: {e}\n\nPlease try again with /run")
         await client.disconnect()
         if user_id in TEMP_CLIENTS:
             del TEMP_CLIENTS[user_id]
@@ -703,18 +1250,23 @@ async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def source(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle source group input"""
     context.user_data['source_group'] = update.message.text.strip()
+    logger.info(f"Source group set: {context.user_data['source_group']}")
     await update.message.reply_text(
-        "📤 **Step 6/7: Target Group**\n\n"
-        "Enter target group username or link:"
+        "Step 6/7: Target Group\n\n"
+        "Enter target group username or link:\n"
+        "This is where members will be invited to."
     )
     return TARGET
 
 async def target(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle target group input"""
     context.user_data['target_group'] = update.message.text.strip()
+    logger.info(f"Target group set: {context.user_data['target_group']}")
     await update.message.reply_text(
-        "🔗 **Step 7/7: Invite Link**\n\n"
-        "Enter the invite link for your target group:"
+        "Step 7/7: Invite Link\n\n"
+        "Enter the invite link for your target group:\n"
+        "This will be sent in DMs when direct invite fails.\n\n"
+        "Example: https://t.me/+abc123"
     )
     return INVITE_LINK
 
@@ -739,13 +1291,17 @@ async def invite_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     USER_HISTORY[user_id] = dict(context.user_data)
     save_user_history()
 
-    keyboard = [['📋 Main Menu']]
+    keyboard = [[KeyboardButton('Main Menu'), KeyboardButton('Statistics')]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-    logger.info(f"✅ Configuration saved for user {user_id}")
+    logger.info(f"Configuration saved for user {user_id}")
     await update.message.reply_text(
-        "✅ **Configuration Saved!**\n\n"
-        "Starting invite task...",
+        "Configuration Saved!\n\n"
+        f"Source: {context.user_data['source_group']}\n"
+        f"Target: {context.user_data['target_group']}\n"
+        f"Link: {context.user_data['invite_link']}\n\n"
+        f"Starting invite task...\n"
+        f"Monitor progress on web dashboard!",
         reply_markup=reply_markup
     )
     
@@ -758,15 +1314,19 @@ async def rerun(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     if user_id not in USER_HISTORY:
-        await update.message.reply_text("❌ No previous configuration found. Use /run first.")
+        await update.message.reply_text("No previous configuration found. Use /run first.")
         return
     
     if user_id in ACTIVE_TASKS:
-        await update.message.reply_text("⚠️ A task is already running!")
+        await update.message.reply_text("A task is already running! Use /stop first.")
         return
     
-    logger.info(f"🔄 Rerunning task for user {user_id}")
-    await update.message.reply_text("🔄 Rerunning your last task...")
+    logger.info(f"Rerunning task for user {user_id}")
+    await update.message.reply_text(
+        "Rerunning Last Task...\n\n"
+        "Using your previous configuration.\n"
+        "Monitor progress on web dashboard!"
+    )
     asyncio.create_task(invite_task(user_id, update, context))
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -777,13 +1337,16 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in TEMP_CLIENTS:
         try:
             await TEMP_CLIENTS[user_id].disconnect()
+            logger.info(f"Disconnected temp client for user {user_id}")
         except:
             pass
         del TEMP_CLIENTS[user_id]
     
+    keyboard = [[KeyboardButton('Main Menu')]]
     await update.message.reply_text(
-        "❌ Operation cancelled.",
-        reply_markup=ReplyKeyboardMarkup([['📋 Main Menu']], resize_keyboard=True)
+        "Operation Cancelled\n\n"
+        "Use /start to begin again.",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
     return ConversationHandler.END
 
@@ -791,32 +1354,43 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle keyboard button presses"""
     text = update.message.text
     
-    if text == '🚀 Start New Task':
+    if text == 'Start New Task':
         return await run_command(update, context)
-    elif text == '🔄 Repeat Last Task':
+    elif text == 'Repeat Last Task':
         return await rerun(update, context)
-    elif text == '📊 Statistics':
+    elif text == 'Statistics':
         return await stats_command(update, context)
-    elif text == '❓ Help':
+    elif text == 'Help':
         return await help_command(update, context)
-    elif text == '📋 Main Menu':
+    elif text == 'Dashboard':
+        return await dashboard_command(update, context)
+    elif text == 'Main Menu':
         return await start(update, context)
+    elif text == 'Settings':
+        await update.message.reply_text(
+            "Settings\n\n"
+            "Current settings are managed in the code.\n"
+            "Default delays: 4-10 seconds\n"
+            "Pause time: 10 minutes on flood\n\n"
+            "Contact developer for custom settings."
+        )
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
-    logger.error(f"Exception while handling an update: {context.error}")
+    logger.error(f"Exception while handling update: {context.error}")
 
 # ---------------- FLASK SERVER THREAD ----------------
 def run_flask():
     """Run Flask server in separate thread"""
-    app.run(host='0.0.0.0', port=PORT, threaded=True)
+    logger.info(f"Starting Flask server on port {PORT}")
+    app.run(host='0.0.0.0', port=PORT, threaded=True, debug=False)
 
 # ---------------- BOT SETUP ----------------
 def main():
     """Main function to run the bot"""
     if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN not found in environment variables!")
-        print("❌ ERROR: BOT_TOKEN not set!")
+        logger.error("BOT_TOKEN not found in environment variables!")
+        print("ERROR: BOT_TOKEN not set!")
         print("Please set BOT_TOKEN in environment variables.")
         return
 
@@ -824,7 +1398,7 @@ def main():
         # Start Flask server in background thread
         flask_thread = Thread(target=run_flask, daemon=True)
         flask_thread.start()
-        logger.info(f"🌐 Web dashboard started on port {PORT}")
+        logger.info(f"Web dashboard started on port {PORT}")
         
         # Setup conversation handler with OTP support
         conv_handler = ConversationHandler(
@@ -842,7 +1416,7 @@ def main():
             fallbacks=[CommandHandler('cancel', cancel)],
         )
 
-        application = ApplicationBuilder().token(BOT_TOKEN).build()
+        application = Application.builder().token(BOT_TOKEN).build()
         
         application.add_handler(CommandHandler('start', start))
         application.add_handler(CommandHandler('help', help_command))
@@ -852,32 +1426,32 @@ def main():
         application.add_handler(CommandHandler('resume', resume_command))
         application.add_handler(CommandHandler('stop', stop_command))
         application.add_handler(CommandHandler('clear', clear_command))
+        application.add_handler(CommandHandler('dashboard', dashboard_command))
         application.add_handler(conv_handler)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
         application.add_error_handler(error_handler)
 
-        logger.info("🤖 Bot is starting...")
-        logger.info(f"🌐 Access web dashboard at: http://localhost:{PORT}")
+        logger.info("Bot is starting...")
+        logger.info(f"Web dashboard available at: http://localhost:{PORT}")
+        logger.info("All handlers registered")
+        
+        print("\n" + "="*60)
+        print("TELEGRAM INVITE BOT - FULLY OPERATIONAL")
+        print("="*60)
+        print(f"Bot Token: {'*' * 20}{BOT_TOKEN[-10:]}")
+        print(f"Dashboard: http://localhost:{PORT}")
+        print(f"Health Check: http://localhost:{PORT}/health")
+        print(f"Status: RUNNING")
+        print("="*60 + "\n")
+        
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+        print("\nBot stopped gracefully")
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
-        print(f"❌ Failed to start bot: {e}")
+        print(f"Failed to start bot: {e}")
 
 if __name__ == '__main__':
     main()
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help command handler"""
-    help_text = (
-        "📚 **Command Guide**\n\n"
-        "🚀 /run - Start new invite task\n"
-        "🔄 /rerun - Repeat last task\n"
-        "⏸️ /pause - Pause running task\n"
-        "▶️ /resume - Resume paused task\n"
-        "⏹️ /stop - Stop running task\n"
-        "📊 /stats - View statistics\n"
-        "🗑️ /clear - Clear history\n"
-        "❌ /cancel - Cancel operation\n\n"
-        "💡 **Tips:**\n"
-        "• Keep delays between 4-10 seconds\n
