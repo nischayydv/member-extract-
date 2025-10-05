@@ -1,3 +1,4 @@
 telethon==1.34.0
 python-telegram-bot==20.7
 asyncio==3.4.3
+flask
