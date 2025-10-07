@@ -1196,7 +1196,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not token:
         token = generate_dashboard_token(user_id)
     
-    dashboard_url = f"https://your-app-url.com/dashboard/{token}"  # Replace with your actual URL
+    dashboard_url = f"https://uploader-bot-ny-1twx.onrender.com/dashboard/{token}"  # Replace with your actual URL
     
     keyboard = [
         [InlineKeyboardButton('🚀 Start New Task', callback_data='start_task')],
