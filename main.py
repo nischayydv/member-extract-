@@ -493,7 +493,7 @@ def logs_stream():
                 break
     
     return Response(generate(), mimetype='text/event-stream')
-
+    
 @app.route('/health')
 def health():
     return jsonify({
