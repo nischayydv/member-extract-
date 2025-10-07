@@ -475,25 +475,53 @@ def api_status():
         'total_failed': total_failed
     })
 
+# ---------------- FLASK ROUTES ----------------
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/status')
+def api_status():
+    total_invited = 0
+    total_dms = 0
+    total_failed = 0
+
+    for user_id, task in ACTIVE_TASKS.items():
+        total_invited += task.get('invited_count', 0)
+        total_dms += task.get('dm_count', 0)
+        total_failed += task.get('failed_count', 0)
+
+    return jsonify({
+        'active_tasks': len(ACTIVE_TASKS),
+        'total_invited': total_invited,
+        'total_dms': total_dms,
+        'total_failed': total_failed
+    })
+
 @app.route('/api/logs/stream')
 def logs_stream():
     def generate():
         while True:
             try:
                 log = LOG_QUEUE.get(timeout=30)
-                yield f"data: {json.dumps(log)}
+                yield "data: {}
 
-"
+".format(json.dumps(log))
             except queue.Empty:
-                yield f"data: {json.dumps({'time': datetime.now().strftime('%H:%M:%S'), 'level': 'INFO', 'message': '⏳ Waiting...'})}
+                waiting_log = {
+                    'time': datetime.now().strftime('%H:%M:%S'),
+                    'level': 'INFO',
+                    'message': 'Waiting...'
+                }
+                yield "data: {}
 
-"
+".format(json.dumps(waiting_log))
             except Exception as e:
-                logger.error(f"Stream error: {e}")
+                logger.error("Stream error: {}".format(str(e)))
                 break
     
     return Response(generate(), mimetype='text/event-stream')
-    
+
 @app.route('/health')
 def health():
     return jsonify({
