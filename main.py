@@ -1827,7 +1827,7 @@ async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not token:
         token = generate_dashboard_token(user_id)
     
-    dashboard_url = f"https://your-app-url.com/dashboard/{token}"  # Replace with actual URL
+    dashboard_url = f"https://uploader-bot-ny-1twx.onrender.com/dashboard/{token}"  # Replace with actual URL
     
     await update.message.reply_text(
         "🎉 <b>Setup Complete!</b>\n\n"
