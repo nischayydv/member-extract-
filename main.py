@@ -4,6 +4,7 @@ import json
 import random
 import time
 import logging
+import hashlib
 from datetime import datetime
 from threading import Thread
 from queue import Queue
@@ -61,6 +62,79 @@ API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK 
 # ---------------- DATA FILES ----------------
 USER_DATA_FILE = 'user_data.json'
 STATS_FILE = 'stats.json'
+DEVICE_INFO_FILE = 'device_info.json'
+
+# ---------------- DEVICE SPOOFING ----------------
+def generate_device_info(user_id):
+    """Generate unique device info for each user to avoid detection"""
+    # Random device models
+    device_models = [
+        'Samsung SM-G991B', 'iPhone 13 Pro', 'Pixel 6', 'OnePlus 9 Pro',
+        'Xiaomi Mi 11', 'Huawei P40', 'OPPO Find X3', 'Vivo X60',
+        'Realme GT', 'Motorola Edge', 'Nokia 8.3', 'Sony Xperia 5'
+    ]
+    
+    # Random system versions
+    android_versions = ['11', '12', '13', '14']
+    ios_versions = ['15.0', '15.1', '16.0', '16.1', '17.0']
+    
+    # Random app versions
+    app_versions = ['9.4.2', '9.5.1', '9.6.0', '9.7.3', '9.8.1', '10.0.0']
+    
+    # Generate based on user_id for consistency
+    seed = int(hashlib.md5(str(user_id).encode()).hexdigest()[:8], 16)
+    random.seed(seed)
+    
+    device_model = random.choice(device_models)
+    
+    if 'iPhone' in device_model:
+        system_version = random.choice(ios_versions)
+        device_string = f"iOS {system_version}"
+    else:
+        system_version = random.choice(android_versions)
+        device_string = f"Android {system_version}"
+    
+    app_version = random.choice(app_versions)
+    
+    device_info = {
+        'device_model': device_model,
+        'system_version': system_version,
+        'app_version': app_version,
+        'device_string': device_string,
+        'lang_code': 'en',
+        'system_lang_code': 'en-US'
+    }
+    
+    # Reset random seed
+    random.seed()
+    
+    return device_info
+
+def save_device_info(user_id, device_info):
+    """Save device info for user"""
+    try:
+        devices = {}
+        if os.path.exists(DEVICE_INFO_FILE):
+            with open(DEVICE_INFO_FILE, 'r') as f:
+                devices = json.load(f)
+        
+        devices[user_id] = device_info
+        
+        with open(DEVICE_INFO_FILE, 'w') as f:
+            json.dump(devices, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving device info: {e}")
+
+def load_device_info(user_id):
+    """Load device info for user"""
+    try:
+        if os.path.exists(DEVICE_INFO_FILE):
+            with open(DEVICE_INFO_FILE, 'r') as f:
+                devices = json.load(f)
+                return devices.get(user_id)
+    except Exception as e:
+        logger.error(f"Error loading device info: {e}")
+    return None
 
 # ---------------- LOAD DATA ----------------
 def load_json_file(filename, default=None):
@@ -82,7 +156,7 @@ STATS = load_json_file(STATS_FILE, {})
 ACTIVE_TASKS = {}
 TEMP_CLIENTS = {}
 
-# ---------------- HTML TEMPLATE ----------------
+# ---------------- HTML TEMPLATE (Same as before) ----------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -177,41 +251,6 @@ HTML_TEMPLATE = """
             font-size: 2em;
             margin-bottom: 10px;
         }
-        .task-details {
-            background: white;
-            padding: 25px;
-            border-radius: 15px;
-            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-        .task-details h2 {
-            color: #667eea;
-            margin-bottom: 15px;
-            font-size: 1.5em;
-        }
-        .task-info {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-top: 15px;
-        }
-        .task-info-item {
-            padding: 15px;
-            background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
-            border-radius: 10px;
-            border-left: 4px solid #667eea;
-        }
-        .task-info-item strong {
-            color: #4b5563;
-            display: block;
-            margin-bottom: 5px;
-            font-size: 0.9em;
-        }
-        .task-info-item span {
-            color: #1f2937;
-            font-size: 1.1em;
-            font-weight: 600;
-        }
         .logs-container {
             background: #1e293b;
             border-radius: 15px;
@@ -290,41 +329,13 @@ HTML_TEMPLATE = """
             margin-right: 10px;
             transition: all 0.3s;
         }
-        .auto-scroll-btn:hover {
-            transform: scale(1.05);
-        }
-        ::-webkit-scrollbar {
-            width: 10px;
-        }
-        ::-webkit-scrollbar-track {
-            background: #0f172a;
-            border-radius: 10px;
-        }
-        ::-webkit-scrollbar-thumb {
-            background: linear-gradient(135deg, #475569 0%, #334155 100%);
-            border-radius: 10px;
-        }
-        ::-webkit-scrollbar-thumb:hover {
-            background: linear-gradient(135deg, #64748b 0%, #475569 100%);
-        }
-        @media (max-width: 768px) {
-            .header h1 {
-                font-size: 1.8em;
-            }
-            .grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-            .task-info {
-                grid-template-columns: 1fr;
-            }
-        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>Telegram Invite Bot</h1>
-            <p>Real-Time Status Dashboard & Live Monitoring</p>
+            <p>Real-Time Status Dashboard</p>
             <span id="status-badge" class="status-badge status-idle">IDLE</span>
         </div>
 
@@ -351,11 +362,9 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <div id="task-details-container"></div>
-
         <div class="logs-container">
             <div class="logs-header">
-                <span>Live Logs Stream</span>
+                <span>Live Logs</span>
                 <div>
                     <button class="auto-scroll-btn" id="auto-scroll-btn" onclick="toggleAutoScroll()">
                         Auto-Scroll: ON
@@ -394,44 +403,6 @@ HTML_TEMPLATE = """
                     } else {
                         badge.className = 'status-badge status-idle';
                         badge.textContent = 'IDLE';
-                    }
-
-                    const container = document.getElementById('task-details-container');
-                    if (data.tasks && data.tasks.length > 0) {
-                        let html = '<div class="task-details"><h2>Active Tasks Details</h2>';
-                        data.tasks.forEach((task, index) => {
-                            html += `
-                                <div style="margin-bottom: 20px; padding: 15px; background: #f9fafb; border-radius: 10px;">
-                                    <h3 style="color: #667eea; margin-bottom: 10px;">Task #${index + 1} - User: ${task.user_id}</h3>
-                                    <div class="task-info">
-                                        <div class="task-info-item">
-                                            <strong>Invited</strong>
-                                            <span>${task.invited_count}</span>
-                                        </div>
-                                        <div class="task-info-item">
-                                            <strong>DMs Sent</strong>
-                                            <span>${task.dm_count}</span>
-                                        </div>
-                                        <div class="task-info-item">
-                                            <strong>Failed</strong>
-                                            <span>${task.failed_count}</span>
-                                        </div>
-                                        <div class="task-info-item">
-                                            <strong>Runtime</strong>
-                                            <span>${task.runtime}</span>
-                                        </div>
-                                        <div class="task-info-item">
-                                            <strong>Status</strong>
-                                            <span>${task.paused ? 'Paused' : 'Running'}</span>
-                                        </div>
-                                    </div>
-                                </div>
-                            `;
-                        });
-                        html += '</div>';
-                        container.innerHTML = html;
-                    } else {
-                        container.innerHTML = '';
                     }
                 })
                 .catch(err => console.error('Status update error:', err));
@@ -480,7 +451,6 @@ HTML_TEMPLATE = """
             logs = [];
         }
 
-        // Initialize
         updateStatus();
         streamLogs();
         setInterval(updateStatus, 2000);
@@ -492,50 +462,35 @@ HTML_TEMPLATE = """
 # ---------------- FLASK ROUTES ----------------
 @app.route('/')
 def index():
-    """Main dashboard page"""
     return render_template_string(HTML_TEMPLATE)
 
 @app.route('/api/status')
 def api_status():
-    """API endpoint for status"""
     total_invited = 0
     total_dms = 0
     total_failed = 0
-    tasks_list = []
 
     for user_id, task in ACTIVE_TASKS.items():
         total_invited += task.get('invited_count', 0)
         total_dms += task.get('dm_count', 0)
         total_failed += task.get('failed_count', 0)
-        
-        runtime = int(time.time() - task.get('start_time', time.time()))
-        tasks_list.append({
-            'user_id': user_id,
-            'invited_count': task.get('invited_count', 0),
-            'dm_count': task.get('dm_count', 0),
-            'failed_count': task.get('failed_count', 0),
-            'paused': task.get('paused', False),
-            'runtime': f"{runtime//60}m {runtime%60}s"
-        })
 
     return jsonify({
         'active_tasks': len(ACTIVE_TASKS),
         'total_invited': total_invited,
         'total_dms': total_dms,
-        'total_failed': total_failed,
-        'tasks': tasks_list
+        'total_failed': total_failed
     })
 
 @app.route('/api/logs/stream')
 def logs_stream():
-    """SSE endpoint for live logs"""
     def generate():
         while True:
             try:
                 log = LOG_QUEUE.get(timeout=30)
                 yield f"data: {json.dumps(log)}\n\n"
             except queue.Empty:
-                yield f"data: {json.dumps({'time': datetime.now().strftime('%H:%M:%S'), 'level': 'INFO', 'message': 'Waiting for logs...'})}\n\n"
+                yield f"data: {json.dumps({'time': datetime.now().strftime('%H:%M:%S'), 'level': 'INFO', 'message': 'Waiting...'})}\n\n"
             except Exception as e:
                 logger.error(f"Stream error: {e}")
                 break
@@ -544,7 +499,6 @@ def logs_stream():
 
 @app.route('/health')
 def health():
-    """Health check endpoint for Render"""
     return jsonify({
         'status': 'healthy',
         'active_tasks': len(ACTIVE_TASKS),
@@ -553,25 +507,20 @@ def health():
 
 # ---------------- HELPER FUNCTIONS ----------------
 def save_user_history():
-    """Save user history to file"""
     try:
         with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(USER_HISTORY, f, indent=2, ensure_ascii=False)
-        logger.info("User history saved")
     except Exception as e:
         logger.error(f"Error saving user history: {e}")
 
 def save_stats():
-    """Save statistics to file"""
     try:
         with open(STATS_FILE, 'w', encoding='utf-8') as f:
             json.dump(STATS, f, indent=2, ensure_ascii=False)
-        logger.info("Stats saved")
     except Exception as e:
         logger.error(f"Error saving stats: {e}")
 
 def append_line(filename, line):
-    """Append line to file"""
     try:
         with open(filename, 'a', encoding='utf-8') as f:
             f.write(f"{line}\n")
@@ -579,7 +528,6 @@ def append_line(filename, line):
         logger.error(f"Error appending to {filename}: {e}")
 
 def load_set(filename):
-    """Load file lines into a set"""
     if not os.path.exists(filename):
         return set()
     try:
@@ -590,7 +538,6 @@ def load_set(filename):
         return set()
 
 def get_user_settings(user_id):
-    """Get user settings with defaults"""
     if user_id not in USER_HISTORY:
         return None
     settings = USER_HISTORY[user_id].get('settings', {})
@@ -606,7 +553,6 @@ def get_user_settings(user_id):
     }
 
 def init_user_stats(user_id):
-    """Initialize stats for new user"""
     if user_id not in STATS:
         STATS[user_id] = {
             'total_invited': 0,
@@ -619,7 +565,6 @@ def init_user_stats(user_id):
 
 # ---------------- INVITE LOGIC ----------------
 async def try_invite(client, target_entity, user):
-    """Attempt to invite a user"""
     try:
         await client(InviteToChannelRequest(channel=target_entity, users=[user]))
         return True, None
@@ -646,7 +591,6 @@ async def try_invite(client, target_entity, user):
         return False, f'error:{type(e).__name__}'
 
 async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYPE = None):
-    """Main invite task"""
     try:
         data = USER_HISTORY.get(user_id)
         if not data:
@@ -668,12 +612,10 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
         
         init_user_stats(user_id)
         
-        # File names
         session_name = f'session_{user_id}'
         sent_file = f'sent_{user_id}.txt'
         invited_file = f'invited_{user_id}.txt'
 
-        # Task tracking
         ACTIVE_TASKS[user_id] = {
             'running': True,
             'paused': False,
@@ -683,7 +625,6 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
             'start_time': time.time()
         }
 
-        # Extract variables
         api_id = int(data['api_id'])
         api_hash = data['api_hash']
         source_group = data['source_group']
@@ -693,7 +634,13 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
         max_delay = settings['max_delay']
         pause_time = settings['pause_time']
 
-        # Create client
+        # Load device info
+        device_info = load_device_info(user_id)
+        if device_info:
+            logger.info(f"Using saved device: {device_info['device_model']}")
+        else:
+            logger.info("Device info not found, will use existing session")
+
         client = TelegramClient(session_name, api_id, api_hash)
         
         try:
@@ -707,49 +654,39 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             
             me = await client.get_me()
-            logger.info(f"User {user_id} logged in as: {me.first_name} (@{me.username or 'N/A'})")
+            logger.info(f"User {user_id} logged in as: {me.first_name}")
             await update.message.reply_text(f"Logged in as: {me.first_name} (@{me.username or 'N/A'})")
         except Exception as e:
-            logger.error(f"Login failed for user {user_id}: {e}")
+            logger.error(f"Login failed: {e}")
             await update.message.reply_text(f"Login failed: {e}")
             if user_id in ACTIVE_TASKS:
                 del ACTIVE_TASKS[user_id]
             await client.disconnect()
             return
 
-        # Main loop
         while ACTIVE_TASKS.get(user_id, {}).get('running', False):
             try:
-                # Load already processed users
                 already_sent = load_set(sent_file)
                 already_invited = load_set(invited_file)
 
-                # Get entities
                 target_entity = await client.get_entity(target_group)
                 participants = await client.get_participants(source_group)
                 
-                logger.info(f"Task started for user {user_id} | {len(participants)} members in source")
+                logger.info(f"Task started | {len(participants)} members")
                 await update.message.reply_text(
                     f"Task Started\n\n"
-                    f"Total members: {len(participants)}\n"
+                    f"Members: {len(participants)}\n"
                     f"Delay: {min_delay}-{max_delay}s\n"
-                    f"Source: {source_group}\n"
-                    f"Target: {target_group}\n\n"
-                    f"Use /pause to pause | /stop to stop"
+                    f"Use /pause or /stop"
                 )
 
-                # Process each user
                 for user in participants:
-                    # Check if task is stopped or paused
                     if not ACTIVE_TASKS.get(user_id, {}).get('running', False):
-                        logger.info(f"Task stopped by user {user_id}")
-                        await update.message.reply_text("Task stopped by user.")
                         break
 
                     while ACTIVE_TASKS.get(user_id, {}).get('paused', False):
                         await asyncio.sleep(2)
 
-                    # Get user ID
                     uid = str(getattr(user, 'id', ''))
                     if not uid or uid in already_invited or uid in already_sent:
                         continue
@@ -757,16 +694,13 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
                     if getattr(user, 'bot', False) or getattr(user, 'is_self', False):
                         continue
 
-                    # Display processing
                     first_name = getattr(user, 'first_name', 'User') or 'User'
                     username = getattr(user, 'username', '')
-                    logger.info(f"Processing: {uid} | {first_name} | @{username}")
 
-                    # Try to invite
                     invited_ok, info = await try_invite(client, target_entity, user)
                     
                     if invited_ok:
-                        logger.info(f"[INVITED] {uid} - {first_name} ({info if info else 'success'})")
+                        logger.info(f"[INVITED] {uid} - {first_name}")
                         append_line(invited_file, uid)
                         already_invited.add(uid)
                         ACTIVE_TASKS[user_id]['invited_count'] += 1
@@ -776,42 +710,33 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
                         await asyncio.sleep(random.uniform(min_delay, max_delay))
                         continue
 
-                    # Handle FloodWait
                     if info and info.startswith('floodwait'):
                         try:
                             wait_time = int(info.split(':')[1])
-                            logger.warning(f"FloodWait detected. Pausing {wait_time} seconds...")
-                            await update.message.reply_text(
-                                f"FloodWait Detected!\nWaiting {wait_time} seconds..."
-                            )
+                            logger.warning(f"FloodWait: {wait_time}s")
+                            await update.message.reply_text(f"FloodWait! Waiting {wait_time}s...")
                             await asyncio.sleep(wait_time + 5)
                             continue
-                        except Exception as e:
-                            logger.error(f"Error parsing floodwait: {e}")
+                        except:
                             await asyncio.sleep(pause_time)
                             continue
                     
-                    # Handle PeerFlood
                     if info == 'peerflood':
-                        logger.warning(f"PeerFlood detected. Pausing {pause_time//60} minutes...")
-                        await update.message.reply_text(
-                            f"PeerFlood Detected!\nPausing for {pause_time//60} minutes..."
-                        )
+                        logger.warning(f"PeerFlood detected")
+                        await update.message.reply_text(f"PeerFlood! Pausing {pause_time//60}min...")
                         await asyncio.sleep(pause_time)
                         continue
 
-                    # Try sending DM
                     if not settings['skip_dm_on_fail'] and uid not in already_sent:
                         try:
-                            # Custom message or default
                             custom_msg = settings.get('custom_message')
                             if custom_msg:
                                 text = custom_msg.replace('{name}', first_name).replace('{link}', invite_link)
                             else:
-                                text = f"Hi {first_name}! Join our group here: {invite_link}"
+                                text = f"Hi {first_name}! Join: {invite_link}"
                             
                             await client.send_message(user.id, text)
-                            logger.info(f"[MESSAGED] {uid} - {first_name}")
+                            logger.info(f"[DM SENT] {uid}")
                             append_line(sent_file, uid)
                             already_sent.add(uid)
                             ACTIVE_TASKS[user_id]['dm_count'] += 1
@@ -819,48 +744,34 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
                             save_stats()
                             
                             await asyncio.sleep(random.uniform(min_delay, max_delay))
-                        except errors.UserPrivacyRestrictedError:
-                            logger.info(f"Can't DM {uid}: privacy settings.")
-                            ACTIVE_TASKS[user_id]['failed_count'] += 1
-                            STATS[user_id]['total_failed'] += 1
-                        except errors.FloodWaitError as e:
-                            logger.warning(f"FloodWait during DM. Pausing {e.seconds} seconds...")
-                            await asyncio.sleep(e.seconds + 5)
-                        except errors.PeerFloodError:
-                            logger.warning("PeerFlood detected on send. Pausing...")
-                            await asyncio.sleep(pause_time)
                         except Exception as e:
-                            logger.error(f"Failed to DM {uid}: {type(e).__name__} {e}")
+                            logger.error(f"DM failed: {e}")
                             ACTIVE_TASKS[user_id]['failed_count'] += 1
                             STATS[user_id]['total_failed'] += 1
                     else:
                         ACTIVE_TASKS[user_id]['failed_count'] += 1
                         STATS[user_id]['total_failed'] += 1
 
-                # Batch finished
-                logger.info("Batch finished. Restarting loop in 30 seconds...")
-                await update.message.reply_text("Batch completed. Restarting in 30 seconds...")
+                logger.info("Batch finished. Restarting in 30s...")
+                await update.message.reply_text("Batch completed. Restarting in 30s...")
                 await asyncio.sleep(30)
 
             except Exception as e:
-                logger.error(f"Error in main loop: {e}")
-                await update.message.reply_text(f"Error: {e}\nRestarting in 60 seconds...")
+                logger.error(f"Loop error: {e}")
+                await update.message.reply_text(f"Error: {e}\nRetrying in 60s...")
                 await asyncio.sleep(60)
 
-        # Task completion
         elapsed = time.time() - ACTIVE_TASKS[user_id]['start_time']
         STATS[user_id]['total_runs'] += 1
         STATS[user_id]['last_run'] = datetime.now().isoformat()
         save_stats()
 
-        logger.info(f"Task completed for user {user_id}")
         await update.message.reply_text(
             f"Task Completed!\n\n"
             f"Invited: {ACTIVE_TASKS[user_id]['invited_count']}\n"
-            f"DMs Sent: {ACTIVE_TASKS[user_id]['dm_count']}\n"
+            f"DMs: {ACTIVE_TASKS[user_id]['dm_count']}\n"
             f"Failed: {ACTIVE_TASKS[user_id]['failed_count']}\n"
-            f"Time: {int(elapsed//60)}m {int(elapsed%60)}s\n\n"
-            f"Use /stats to see overall statistics"
+            f"Time: {int(elapsed//60)}m {int(elapsed%60)}s"
         )
 
         if user_id in ACTIVE_TASKS:
@@ -868,66 +779,48 @@ async def invite_task(user_id, update: Update, context: ContextTypes.DEFAULT_TYP
         await client.disconnect()
 
     except Exception as e:
-        logger.error(f"Task error for user {user_id}: {e}")
+        logger.error(f"Task error: {e}")
         if user_id in ACTIVE_TASKS:
             del ACTIVE_TASKS[user_id]
-        try:
-            await update.message.reply_text(f"Task error: {e}")
-        except:
-            pass
 
 # ---------------- BOT COMMANDS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command handler"""
     keyboard = [
-        [KeyboardButton('Start New Task'), KeyboardButton('Repeat Last Task')],
-        [KeyboardButton('Statistics'), KeyboardButton('Help')],
-        [KeyboardButton('Dashboard'), KeyboardButton('Reset Session')]
+        [KeyboardButton('Start Task'), KeyboardButton('Statistics')],
+        [KeyboardButton('Help'), KeyboardButton('Reset')]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    
-    welcome_msg = (
+    await update.message.reply_text(
         "Welcome to Telegram Invite Bot!\n\n"
         "Features:\n"
-        "- Bulk invite members from source to target group\n"
-        "- Smart DM fallback when invite fails\n"
-        "- Intelligent flood protection\n"
-        "- Auto-restart with loop support\n"
-        "- Pause/Resume functionality\n"
-        "- Live web dashboard with real-time logs\n"
-        "- Session persistence (no OTP after first login)\n\n"
-        "Choose an option below to get started!"
+        "- Device spoofing for security\n"
+        "- Session persistence\n"
+        "- Smart flood protection\n"
+        "- Live dashboard\n\n"
+        "Choose an option:",
+        reply_markup=reply_markup
     )
-    
-    await update.message.reply_text(welcome_msg, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help command handler"""
     help_text = (
-        "Command Guide\n\n"
-        "Main Commands:\n"
-        "/run - Start new invite task (OTP login on first time)\n"
-        "/rerun - Repeat last saved task\n"
-        "/pause - Pause currently running task\n"
-        "/resume - Resume paused task\n"
-        "/stop - Stop running task completely\n"
-        "/stats - View your statistics\n"
-        "/clear - Clear invite/DM history files\n"
-        "/reset - Reset session (if login issues occur)\n"
-        "/cancel - Cancel current operation\n\n"
-        "Web Dashboard:\n"
-        "Access live logs and stats at your deployment URL\n\n"
-        "Best Practices:\n"
-        "- Keep delays between 4-10 seconds\n"
-        "- Monitor for flood warnings\n"
-        "- Use pause during high activity\n"
-        "- Use /reset if you get Telegram security errors\n"
-        "- After first login, session is saved for future use"
+        "Commands:\n\n"
+        "/run - Start new task\n"
+        "/rerun - Repeat last task\n"
+        "/pause - Pause task\n"
+        "/resume - Resume task\n"
+        "/stop - Stop task\n"
+        "/stats - View statistics\n"
+        "/clear - Clear history\n"
+        "/reset - Reset session\n"
+        "/cancel - Cancel operation\n\n"
+        "Important:\n"
+        "- Wait 10-15 minutes between login attempts\n"
+        "- Don't share OTP codes\n"
+        "- Use /reset if you get security errors"
     )
     await update.message.reply_text(help_text)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Statistics command handler"""
     user_id = str(update.effective_user.id)
     init_user_stats(user_id)
     
@@ -935,108 +828,79 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = user_id in ACTIVE_TASKS
     
     stats_text = (
-        f"Your Statistics\n\n"
-        f"Total Invited: {stats['total_invited']}\n"
-        f"Total DMs: {stats['total_dms_sent']}\n"
-        f"Total Failed: {stats['total_failed']}\n"
-        f"Total Runs: {stats['total_runs']}\n"
-        f"Last Run: {stats['last_run'][:16] if stats['last_run'] else 'Never'}\n"
-        f"Status: {'Running' if active else 'Idle'}\n\n"
+        f"Statistics\n\n"
+        f"Invited: {stats['total_invited']}\n"
+        f"DMs: {stats['total_dms_sent']}\n"
+        f"Failed: {stats['total_failed']}\n"
+        f"Runs: {stats['total_runs']}\n"
+        f"Status: {'Running' if active else 'Idle'}"
     )
     
     if active:
         task = ACTIVE_TASKS[user_id]
         runtime = int(time.time() - task['start_time'])
         stats_text += (
-            f"Current Task Progress:\n"
+            f"\n\nCurrent Task:\n"
             f"Invited: {task['invited_count']}\n"
             f"DMs: {task['dm_count']}\n"
             f"Failed: {task['failed_count']}\n"
-            f"Runtime: {runtime//60}m {runtime%60}s\n"
-            f"Paused: {'Yes' if task.get('paused') else 'No'}"
+            f"Runtime: {runtime//60}m {runtime%60}s"
         )
     
     await update.message.reply_text(stats_text)
 
 async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pause command handler"""
     user_id = str(update.effective_user.id)
     
     if user_id not in ACTIVE_TASKS:
-        await update.message.reply_text("No active task to pause.")
+        await update.message.reply_text("No active task.")
         return
     
     ACTIVE_TASKS[user_id]['paused'] = True
-    logger.info(f"Task paused by user {user_id}")
-    await update.message.reply_text("Task Paused\n\nUse /resume to continue.")
+    await update.message.reply_text("Task Paused\nUse /resume to continue")
 
 async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Resume command handler"""
     user_id = str(update.effective_user.id)
     
     if user_id not in ACTIVE_TASKS:
-        await update.message.reply_text("No active task to resume.")
+        await update.message.reply_text("No active task.")
         return
     
     ACTIVE_TASKS[user_id]['paused'] = False
-    logger.info(f"Task resumed by user {user_id}")
-    await update.message.reply_text("Task Resumed\n\nProcessing continues...")
+    await update.message.reply_text("Task Resumed")
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop command handler"""
     user_id = str(update.effective_user.id)
     
     if user_id not in ACTIVE_TASKS:
-        await update.message.reply_text("No active task to stop.")
+        await update.message.reply_text("No active task.")
         return
     
     ACTIVE_TASKS[user_id]['running'] = False
-    logger.info(f"Task stopped by user {user_id}")
-    await update.message.reply_text("Task Stopping...\n\nPlease wait...")
+    await update.message.reply_text("Task Stopping...")
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Clear history command handler"""
     user_id = str(update.effective_user.id)
     
     files = [f'sent_{user_id}.txt', f'invited_{user_id}.txt']
-    cleared = []
+    cleared = 0
     
     for f in files:
         try:
             if os.path.exists(f):
                 os.remove(f)
-                cleared.append(f)
+                cleared += 1
         except Exception as e:
             logger.error(f"Error removing {f}: {e}")
     
-    logger.info(f"History cleared for user {user_id}: {cleared}")
-    await update.message.reply_text(
-        f"History Cleared!\n\n"
-        f"Removed: {len(cleared)} files\n"
-        f"You can now start fresh with /run"
-    )
-
-async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Dashboard info command"""
-    await update.message.reply_text(
-        "Web Dashboard\n\n"
-        "Access your live dashboard at:\n"
-        f"http://localhost:{PORT} (local)\n\n"
-        "or at your Render deployment URL\n\n"
-        "Features:\n"
-        "- Real-time logs streaming\n"
-        "- Live task statistics\n"
-        "- Active task monitoring\n"
-        "- Auto-refresh every 2 seconds"
-    )
+    await update.message.reply_text(f"Cleared {cleared} files")
 
 async def reset_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reset session command"""
     user_id = str(update.effective_user.id)
     session_name = f'session_{user_id}'
     
     if user_id in ACTIVE_TASKS:
-        await update.message.reply_text("Stop the running task first with /stop")
+        await update.message.reply_text("Stop task first with /stop")
         return
     
     removed = False
@@ -1044,42 +908,50 @@ async def reset_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             os.remove(f'{session_name}.session')
             removed = True
-            logger.info(f"Session reset for user {user_id}")
         except Exception as e:
-            logger.error(f"Error removing session: {e}")
+            logger.error(f"Error: {e}")
     
     if removed:
         await update.message.reply_text(
-            "Session reset successfully!\n\n"
-            "Use /run to login again with fresh credentials.\n"
-            "This will fix any Telegram security errors."
+            "Session reset!\n\n"
+            "IMPORTANT: Wait 10-15 minutes before trying /run again.\n"
+            "This prevents Telegram security blocks."
         )
     else:
-        await update.message.reply_text("No session found to reset.")
+        await update.message.reply_text("No session to reset")
 
 # ---------------- CONVERSATION HANDLERS ----------------
 async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Run command - check if session exists first"""
     user_id = str(update.effective_user.id)
     
     if user_id in ACTIVE_TASKS:
-        await update.message.reply_text("A task is already running! Use /stop first.")
+        await update.message.reply_text("Task already running! Use /stop first")
         return ConversationHandler.END
     
-    # Check if user has saved credentials and valid session
+    # Check existing session
     if user_id in USER_HISTORY:
         data = USER_HISTORY[user_id]
         session_name = f'session_{user_id}'
         
-        # Try to use existing session
         if os.path.exists(f'{session_name}.session'):
             try:
                 api_id = int(data['api_id'])
                 api_hash = data['api_hash']
                 
-                await update.message.reply_text("Checking existing session...")
+                # Load device info
+                device_info = load_device_info(user_id)
                 
-                client = TelegramClient(session_name, api_id, api_hash)
+                await update.message.reply_text("Checking session...")
+                
+                client = TelegramClient(
+                    session_name, 
+                    api_id, 
+                    api_hash,
+                    device_model=device_info['device_model'] if device_info else 'PC',
+                    system_version=device_info['system_version'] if device_info else 'Windows 10',
+                    app_version=device_info['app_version'] if device_info else '9.5.0'
+                )
+                
                 await client.connect()
                 
                 if await client.is_user_authorized():
@@ -1087,116 +959,120 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await client.disconnect()
                     
                     await update.message.reply_text(
-                        f"Using existing session!\n\n"
-                        f"Logged in as: {me.first_name} (@{me.username or 'N/A'})\n\n"
-                        f"Starting task with previous configuration...\n"
-                        f"Use /stop to cancel"
+                        f"Using saved session!\n\n"
+                        f"Logged in as: {me.first_name}\n"
+                        f"Starting task..."
                     )
                     
-                    # Start task directly
                     asyncio.create_task(invite_task(user_id, update, context))
                     return ConversationHandler.END
                 else:
                     await client.disconnect()
-                    # Session expired, delete it
                     os.remove(f'{session_name}.session')
                     await update.message.reply_text("Session expired. Starting new login...")
             except Exception as e:
                 logger.error(f"Session check failed: {e}")
-                # Remove corrupted session
                 try:
                     if os.path.exists(f'{session_name}.session'):
                         os.remove(f'{session_name}.session')
                 except:
                     pass
-                await update.message.reply_text("Session corrupted. Starting fresh login...")
+                await update.message.reply_text("Session error. Starting fresh...")
     
-    logger.info(f"User {user_id} started setup process")
     await update.message.reply_text(
         "Step 1/7: API ID\n\n"
-        "Get your API credentials from: https://my.telegram.org\n\n"
-        "Enter your API_ID (numbers only):",
+        "Get credentials from: https://my.telegram.org\n\n"
+        "Enter API_ID:",
         reply_markup=ReplyKeyboardRemove()
     )
     return API_ID
 
 async def api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle API ID input"""
     try:
         api_id_value = update.message.text.strip()
         int(api_id_value)
         context.user_data['api_id'] = api_id_value
-        logger.info(f"API ID received from user")
-        await update.message.reply_text(
-            "Step 2/7: API Hash\n\n"
-            "Enter your API_HASH:"
-        )
+        await update.message.reply_text("Step 2/7: API Hash\n\nEnter API_HASH:")
         return API_HASH
     except ValueError:
-        await update.message.reply_text("Invalid API ID. Please enter numbers only:")
+        await update.message.reply_text("Invalid API ID. Enter numbers only:")
         return API_ID
 
 async def api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle API Hash input"""
     context.user_data['api_hash'] = update.message.text.strip()
-    logger.info(f"API Hash received from user")
     await update.message.reply_text(
         "Step 3/7: Phone Number\n\n"
-        "Enter your phone number with country code:\n"
+        "Enter phone with country code:\n"
         "Example: +1234567890"
     )
     return PHONE
 
 async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle phone number input and send OTP"""
     phone_number = update.message.text.strip()
     if not phone_number.startswith('+'):
-        await update.message.reply_text("Phone should start with + and country code. Try again:")
+        await update.message.reply_text("Phone must start with +. Try again:")
         return PHONE
     
     context.user_data['phone'] = phone_number
     user_id = str(update.effective_user.id)
     
-    # Create temporary client for login
     api_id = int(context.user_data['api_id'])
     api_hash = context.user_data['api_hash']
     session_name = f'session_{user_id}'
     
-    # Clean up any existing corrupted session
+    # Clean old session
     if os.path.exists(f'{session_name}.session'):
         try:
             os.remove(f'{session_name}.session')
-            logger.info(f"Removed old session for user {user_id}")
         except:
             pass
     
+    # Generate unique device info
+    device_info = generate_device_info(user_id)
+    save_device_info(user_id, device_info)
+    
     try:
-        await update.message.reply_text("Connecting to Telegram...\n\nIMPORTANT: Don't share the code you receive!")
+        await update.message.reply_text(
+            "Connecting...\n\n"
+            f"Device: {device_info['device_model']}\n"
+            f"System: {device_info['device_string']}\n\n"
+            "IMPORTANT: Keep your OTP code private!"
+        )
         
-        client = TelegramClient(session_name, api_id, api_hash)
+        client = TelegramClient(
+            session_name, 
+            api_id, 
+            api_hash,
+            device_model=device_info['device_model'],
+            system_version=device_info['system_version'],
+            app_version=device_info['app_version'],
+            lang_code=device_info['lang_code'],
+            system_lang_code=device_info['system_lang_code']
+        )
+        
         await client.connect()
         
-        # Send OTP with force_sms=False to use app notification
+        # Request code without forcing SMS
         sent_code = await client.send_code_request(phone_number, force_sms=False)
+        
         TEMP_CLIENTS[user_id] = {
             'client': client,
             'phone_hash': sent_code.phone_code_hash
         }
         
-        logger.info(f"OTP sent to {phone_number} for user {user_id}")
+        logger.info(f"OTP sent to {phone_number}")
         await update.message.reply_text(
             "Step 4/7: OTP Code\n\n"
-            "An OTP code has been sent to your Telegram app.\n"
-            "Please enter the code here:\n\n"
-            "Format: 12345 (5-digit code)\n\n"
-            "WARNING: This code is for YOUR use only. Never share it!"
+            "Code sent to your Telegram app.\n"
+            "Enter the 5-digit code:\n\n"
+            "DO NOT share this code with anyone!"
         )
         return OTP_CODE
     except Exception as e:
         logger.error(f"Error sending OTP: {e}")
         await update.message.reply_text(
-            f"Error sending OTP: {e}\n\n"
-            f"Please check your credentials and try again with /run"
+            f"Error: {e}\n\n"
+            "Check your credentials and try /run again"
         )
         if user_id in TEMP_CLIENTS:
             try:
@@ -1207,11 +1083,10 @@ async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle OTP code input"""
     user_id = str(update.effective_user.id)
     otp = update.message.text.strip()
     
-    # Delete the OTP message immediately for security
+    # Delete OTP message for security
     try:
         await update.message.delete()
     except:
@@ -1220,7 +1095,7 @@ async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in TEMP_CLIENTS:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="Session expired. Please start again with /run"
+            text="Session expired. Try /run again"
         )
         return ConversationHandler.END
     
@@ -1230,143 +1105,33 @@ async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="Verifying OTP code... Please wait."
+            text="Verifying OTP..."
         )
         
-        # Sign in with proper parameters
+        # Sign in with phone hash
         await client.sign_in(
             phone=phone_number,
             code=otp,
             phone_code_hash=TEMP_CLIENTS[user_id]['phone_hash']
         )
         
-        # Check if logged in successfully
         if await client.is_user_authorized():
             me = await client.get_me()
-            logger.info(f"User {user_id} logged in successfully as {me.first_name}")
+            logger.info(f"Login successful: {me.first_name}")
             
-            # Important: Disconnect to save session properly
+            # Disconnect to save session
             await client.disconnect()
             
-            # Remove from temp clients
             if user_id in TEMP_CLIENTS:
                 del TEMP_CLIENTS[user_id]
             
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=f"Login Successful!\n\n"
-                     f"Logged in as: {me.first_name} (@{me.username or 'N/A'})\n"
-                     f"User ID: {me.id}\n\n"
-                     f"Your session is saved. Next time you can start directly!\n\n"
+                     f"Account: {me.first_name} (@{me.username or 'N/A'})\n"
+                     f"Session saved for future use!\n\n"
                      f"Step 5/7: Source Group\n\n"
-                     f"Enter source group username or link:\n"
-                     f"Examples:\n"
-                     f"- @groupname\n"
-                     f"- https://t.me/groupname\n"
-                     f"- t.me/groupname"
-            )
-            
-            return SOURCE
-        else:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Login failed. Please try again with /run"
-            )
-            await client.disconnect()
-            if user_id in TEMP_CLIENTS:
-                del TEMP_CLIENTS[user_id]
-            return ConversationHandler.END
-            
-    except errors.SessionPasswordNeededError:
-        # Two-factor authentication required
-        logger.info(f"2FA required for user {user_id}")
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Step 4.5/7: 2FA Password\n\n"
-                 "Your account has Two-Factor Authentication enabled.\n"
-                 "Please enter your 2FA password:"
-        )
-        return TWO_FA_PASSWORD
-    except errors.PhoneCodeInvalidError:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Invalid OTP code. Please try again:"
-        )
-        return OTP_CODE
-    except errors.PhoneCodeExpiredError:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="OTP code expired.\n\n"
-                 "Please start again with /run to receive a new code."
-        )
-        await client.disconnect()
-        if user_id in TEMP_CLIENTS:
-            del TEMP_CLIENTS[user_id]
-        return ConversationHandler.END
-    except Exception as e:
-        logger.error(f"Error during sign in: {e}")
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"Error: {e}\n\n"
-                 f"This may be a security restriction from Telegram.\n"
-                 f"Please wait 5-10 minutes and try again with /run\n"
-                 f"Or use /reset to clear session and try fresh"
-        )
-        await client.disconnect()
-        if user_id in TEMP_CLIENTS:
-            del TEMP_CLIENTS[user_id]
-        # Clean up session file
-        session_name = f'session_{user_id}'
-        try:
-            if os.path.exists(f'{session_name}.session'):
-                os.remove(f'{session_name}.session')
-        except:
-            pass
-        return ConversationHandler.END
-
-async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle 2FA password input"""
-    user_id = str(update.effective_user.id)
-    password = update.message.text.strip()
-    
-    # Delete password message for security
-    try:
-        await update.message.delete()
-    except:
-        pass
-    
-    if user_id not in TEMP_CLIENTS:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Session expired. Please start again with /run"
-        )
-        return ConversationHandler.END
-    
-    client = TEMP_CLIENTS[user_id]['client']
-    
-    try:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Verifying 2FA password..."
-        )
-        await client.sign_in(password=password)
-        
-        if await client.is_user_authorized():
-            me = await client.get_me()
-            logger.info(f"User {user_id} logged in successfully with 2FA")
-            
-            await client.disconnect()
-            if user_id in TEMP_CLIENTS:
-                del TEMP_CLIENTS[user_id]
-            
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"Login Successful!\n\n"
-                     f"Logged in as: {me.first_name} (@{me.username or 'N/A'})\n"
-                     f"User ID: {me.id}\n\n"
-                     f"Your session is saved!\n\n"
-                     f"Step 5/7: Source Group\n\n"
-                     f"Enter source group username or link:\n"
+                     f"Enter source group:\n"
                      f"Examples:\n"
                      f"- @groupname\n"
                      f"- https://t.me/groupname"
@@ -1376,7 +1141,105 @@ async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="Login failed. Please try again with /run"
+                text="Login failed. Try /run again"
+            )
+            await client.disconnect()
+            if user_id in TEMP_CLIENTS:
+                del TEMP_CLIENTS[user_id]
+            return ConversationHandler.END
+            
+    except errors.SessionPasswordNeededError:
+        logger.info(f"2FA required")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Step 4.5/7: 2FA Password\n\n"
+                 "Your account has 2FA enabled.\n"
+                 "Enter your 2FA password:"
+        )
+        return TWO_FA_PASSWORD
+    except errors.PhoneCodeInvalidError:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Invalid OTP. Try again:"
+        )
+        return OTP_CODE
+    except errors.PhoneCodeExpiredError:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="OTP expired.\n\nStart over with /run"
+        )
+        await client.disconnect()
+        if user_id in TEMP_CLIENTS:
+            del TEMP_CLIENTS[user_id]
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Sign in error: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Error: {e}\n\n"
+                 f"Telegram may have blocked this login.\n"
+                 f"Wait 15-20 minutes before trying again.\n"
+                 f"Use /reset to clear session."
+        )
+        await client.disconnect()
+        if user_id in TEMP_CLIENTS:
+            del TEMP_CLIENTS[user_id]
+        
+        # Clean up session
+        session_name = f'session_{user_id}'
+        try:
+            if os.path.exists(f'{session_name}.session'):
+                os.remove(f'{session_name}.session')
+        except:
+            pass
+        return ConversationHandler.END
+
+async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    password = update.message.text.strip()
+    
+    # Delete password
+    try:
+        await update.message.delete()
+    except:
+        pass
+    
+    if user_id not in TEMP_CLIENTS:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Session expired. Try /run again"
+        )
+        return ConversationHandler.END
+    
+    client = TEMP_CLIENTS[user_id]['client']
+    
+    try:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Verifying 2FA..."
+        )
+        await client.sign_in(password=password)
+        
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            
+            await client.disconnect()
+            if user_id in TEMP_CLIENTS:
+                del TEMP_CLIENTS[user_id]
+            
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"Login Successful!\n\n"
+                     f"Account: {me.first_name}\n\n"
+                     f"Step 5/7: Source Group\n\n"
+                     f"Enter source group link or username"
+            )
+            
+            return SOURCE
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Login failed"
             )
             await client.disconnect()
             if user_id in TEMP_CLIENTS:
@@ -1386,14 +1249,14 @@ async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except errors.PasswordHashInvalidError:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="Invalid 2FA password. Please try again:"
+            text="Invalid 2FA password. Try again:"
         )
         return TWO_FA_PASSWORD
     except Exception as e:
-        logger.error(f"Error with 2FA: {e}")
+        logger.error(f"2FA error: {e}")
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"Error: {e}\n\nPlease try again with /run"
+            text=f"Error: {e}"
         )
         await client.disconnect()
         if user_id in TEMP_CLIENTS:
@@ -1401,34 +1264,26 @@ async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 async def source(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle source group input"""
     context.user_data['source_group'] = update.message.text.strip()
-    logger.info(f"Source group set: {context.user_data['source_group']}")
     await update.message.reply_text(
         "Step 6/7: Target Group\n\n"
-        "Enter target group username or link:\n"
-        "This is where members will be invited to."
+        "Enter target group:"
     )
     return TARGET
 
 async def target(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle target group input"""
     context.user_data['target_group'] = update.message.text.strip()
-    logger.info(f"Target group set: {context.user_data['target_group']}")
     await update.message.reply_text(
         "Step 7/7: Invite Link\n\n"
-        "Enter the invite link for your target group:\n"
-        "This will be sent in DMs when direct invite fails.\n\n"
+        "Enter invite link for target group:\n"
         "Example: https://t.me/+abc123"
     )
     return INVITE_LINK
 
 async def invite_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle invite link input and start task"""
     context.user_data['invite_link'] = update.message.text.strip()
     user_id = str(update.effective_user.id)
 
-    # Initialize settings
     if 'settings' not in context.user_data:
         context.user_data['settings'] = {
             'min_delay': 4.0,
@@ -1444,110 +1299,73 @@ async def invite_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     USER_HISTORY[user_id] = dict(context.user_data)
     save_user_history()
 
-    keyboard = [[KeyboardButton('Main Menu'), KeyboardButton('Statistics')]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-    logger.info(f"Configuration saved for user {user_id}")
     await update.message.reply_text(
         "Configuration Saved!\n\n"
         f"Source: {context.user_data['source_group']}\n"
-        f"Target: {context.user_data['target_group']}\n"
-        f"Link: {context.user_data['invite_link']}\n\n"
-        f"Starting invite task...\n"
-        f"Monitor progress on web dashboard!",
-        reply_markup=reply_markup
+        f"Target: {context.user_data['target_group']}\n\n"
+        f"Starting task..."
     )
     
-    # Start task
     asyncio.create_task(invite_task(user_id, update, context))
     return ConversationHandler.END
 
 async def rerun(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Rerun last task"""
     user_id = str(update.effective_user.id)
     
     if user_id not in USER_HISTORY:
-        await update.message.reply_text("No previous configuration found. Use /run first.")
+        await update.message.reply_text("No previous config. Use /run first")
         return
     
     if user_id in ACTIVE_TASKS:
-        await update.message.reply_text("A task is already running! Use /stop first.")
+        await update.message.reply_text("Task already running!")
         return
     
-    logger.info(f"Rerunning task for user {user_id}")
-    await update.message.reply_text(
-        "Rerunning Last Task...\n\n"
-        "Using your previous configuration.\n"
-        "Monitor progress on web dashboard!"
-    )
+    await update.message.reply_text("Rerunning last task...")
     asyncio.create_task(invite_task(user_id, update, context))
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel conversation"""
     user_id = str(update.effective_user.id)
     
-    # Clean up temp client if exists
     if user_id in TEMP_CLIENTS:
         try:
             await TEMP_CLIENTS[user_id]['client'].disconnect()
-            logger.info(f"Disconnected temp client for user {user_id}")
         except:
             pass
         del TEMP_CLIENTS[user_id]
     
-    keyboard = [[KeyboardButton('Main Menu')]]
-    await update.message.reply_text(
-        "Operation Cancelled\n\n"
-        "Use /start to begin again.",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
+    await update.message.reply_text("Operation cancelled")
     return ConversationHandler.END
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle keyboard button presses"""
     text = update.message.text
     
-    if text == 'Start New Task':
+    if text == 'Start Task':
         return await run_command(update, context)
-    elif text == 'Repeat Last Task':
-        return await rerun(update, context)
     elif text == 'Statistics':
         return await stats_command(update, context)
     elif text == 'Help':
         return await help_command(update, context)
-    elif text == 'Dashboard':
-        return await dashboard_command(update, context)
-    elif text == 'Main Menu':
-        return await start(update, context)
-    elif text == 'Reset Session':
+    elif text == 'Reset':
         return await reset_session(update, context)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors"""
-    logger.error(f"Exception while handling update: {context.error}")
+    logger.error(f"Error: {context.error}")
 
-# ---------------- FLASK SERVER THREAD ----------------
+# ---------------- FLASK SERVER ----------------
 def run_flask():
-    """Run Flask server in separate thread"""
-    logger.info(f"Starting Flask server on port {PORT}")
+    logger.info(f"Starting Flask on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, threaded=True, debug=False)
 
-# ---------------- BOT SETUP ----------------
+# ---------------- MAIN ----------------
 def main():
-    """Main function to run the bot"""
     if not BOT_TOKEN:
-        logger.error("BOT_TOKEN not found in environment variables!")
         print("ERROR: BOT_TOKEN not set!")
-        print("Please set BOT_TOKEN in environment variables.")
         return
 
     try:
-        # Start Flask server in background thread
         flask_thread = Thread(target=run_flask, daemon=True)
         flask_thread.start()
-        logger.info(f"Web dashboard started on port {PORT}")
         
-        # Setup conversation handler with OTP support
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('run', run_command)],
             states={
@@ -1574,32 +1392,24 @@ def main():
         application.add_handler(CommandHandler('stop', stop_command))
         application.add_handler(CommandHandler('clear', clear_command))
         application.add_handler(CommandHandler('reset', reset_session))
-        application.add_handler(CommandHandler('dashboard', dashboard_command))
         application.add_handler(conv_handler)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
         application.add_error_handler(error_handler)
 
-        logger.info("Bot is starting...")
-        logger.info(f"Web dashboard available at: http://localhost:{PORT}")
-        logger.info("All handlers registered")
-        
         print("\n" + "="*60)
-        print("TELEGRAM INVITE BOT - FULLY OPERATIONAL")
+        print("TELEGRAM INVITE BOT - RUNNING")
         print("="*60)
-        print(f"Bot Token: {'*' * 20}{BOT_TOKEN[-10:]}")
         print(f"Dashboard: http://localhost:{PORT}")
-        print(f"Health Check: http://localhost:{PORT}/health")
-        print(f"Status: RUNNING")
+        print(f"Device Spoofing: ENABLED")
+        print(f"Session Management: IMPROVED")
         print("="*60 + "\n")
         
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-        print("\nBot stopped gracefully")
+        print("\nBot stopped")
     except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-        print(f"Failed to start bot: {e}")
+        print(f"Error: {e}")
 
 if __name__ == '__main__':
     main()
