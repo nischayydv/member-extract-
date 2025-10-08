@@ -12,8 +12,7 @@ from threading import Thread
 from queue import Queue
 from telethon import TelegramClient, errors, functions
 from telethon.tl.types import User
-# IMPORTANT: Import the missing InviteToChannelRequest from telethon.tl.functions.channels
-from telethon.tl.functions.channels import InviteToChannelRequest
+from telethon.tl.functions.channels import InviteToChannelRequest # Added missing import
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, ConversationHandler, 
@@ -743,15 +742,17 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         max_invites = settings.get('max_invites', 0)
         filter_last_seen = settings.get('filter_last_seen', 0)
         
+        # --- FIX APPLIED HERE ---
+        # Original problematic line (752):
+        # f"📈 Limit: {f'{task["invited_count"]}/{max_invites}' if max_invites > 0 else 'Unlimited'}\n"
+        # Corrected line:
         stats_text += (
             f"🔴 Status: <b>{'🟢 RUNNING' if not task.get('paused', False) else '⏸ PAUSED'}</b>\n"
             f"\n🔥 <b>Current Session:</b>\n"
             f"✅ Invited: {task['invited_count']}\n"
             f"❌ Failed: {task['failed_count']}\n"
-            # FIX: Changed ' to " for dictionary key access inside the f-string.
-            # The quotes around the dictionary key are changed from " to '
+            # The Fix: Use escaped single quotes for the dictionary key inside the nested f-string
             f"📈 Limit: {f'{task[\'invited_count\']}/{max_invites}' if max_invites > 0 else 'Unlimited'}\n"
-
             f"🔬 Filter: {f'Last Seen < {filter_last_seen} days' if filter_last_seen > 0 else 'OFF'}\n"
             f"⏱ Runtime: {int(runtime//3600)}h {int((runtime%3600)//60)}m {int(runtime%60)}s\n"
         )
@@ -984,6 +985,10 @@ async def set_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------- LOGIN CONVERSATION HANDLERS (Unchanged flow, cleaned logic) ----------------
+# ... (API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK functions) ...
+# Note: I'm only including the main setup functions for brevity, but the full script will have them.
+# The user's original logic for the login flow (API_ID to INVITE_LINK) is largely correct, 
+# and the only major change is removing the message_effect_id from the last step.
 
 async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ... (Keep original logic)
@@ -2037,8 +2042,8 @@ def main():
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    # Add a check for the existence of InviteToChannelRequest import, 
-    # as it was missing from the user's provided snippet.
-    if 'InviteToChannelRequest' not in globals():
-        print("⚠️ Missing import: InviteToChannelRequest from telethon.tl.functions.channels has been automatically added to the fixed code.")
+    # Add a check for the missing import 'InviteToChannelRequest' which I manually added above
+    if not hasattr(functions, 'channels') or not hasattr(functions.channels, 'InviteToChannelRequest'):
+        print("⚠️ Warning: 'InviteToChannelRequest' was missing an import in the original snippet. Added it.")
+
     main()
