@@ -17,7 +17,7 @@ from telegram.ext import (
     Application, CommandHandler, ConversationHandler, 
     MessageHandler, filters, ContextTypes
 )
-from telegram.constants import MessageEffectId
+from telegram.constants import OtherConstant
 from flask import Flask, render_template_string, jsonify, Response, request, abort
 from pymongo import MongoClient, errors as mongo_errors
 
