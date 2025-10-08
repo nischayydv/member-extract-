@@ -7,17 +7,17 @@ import logging
 import hashlib
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Thread
 from queue import Queue
-from telethon import TelegramClient, errors
-from telethon.tl.functions.channels import InviteToChannelRequest
+from telethon import TelegramClient, errors, functions
+from telethon.tl.types import User
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, ConversationHandler, 
     MessageHandler, filters, ContextTypes
 )
-from flask import Flask, render_template_string, jsonify, Response, request, abort
+from flask import Flask, jsonify, Response, request, abort
 from pymongo import MongoClient, errors as mongo_errors
 
 # ---------------- CONFIGURATION ----------------
@@ -31,6 +31,15 @@ PORT = int(os.environ.get('PORT', 10000))
 APP_URL = os.environ.get('APP_URL', 'https://your-app.onrender.com')
 
 # ---------------- MONGODB SETUP ----------------
+mongo_client = None
+db = None
+users_collection = None
+stats_collection = None
+sessions_collection = None
+tasks_collection = None
+logs_collection = None
+MONGO_AVAILABLE = False
+
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     mongo_client.admin.command('ping')
@@ -40,16 +49,11 @@ try:
     sessions_collection = db['sessions']
     tasks_collection = db['tasks']
     logs_collection = db['logs']
+    MONGO_AVAILABLE = True
     print("✅ MongoDB connected successfully!")
 except Exception as e:
     print(f"❌ MongoDB connection failed: {e}")
-    # Do not exit if Mongo is a background feature, but given the structure, 
-    # we'll keep the exit for critical failure.
-    # exit(1) 
-    # For robust production: Log and allow bot to run without DB if necessary, 
-    # but since this bot relies heavily on DB for state, we assume it's critical.
     print("⚠️ Continuing without MongoDB. Bot state may be lost.")
-    # Set collections to None or mock them if you want to proceed without Mongo
 
 # ---------------- FLASK APP SETUP ----------------
 app = Flask(__name__)
@@ -68,8 +72,7 @@ class QueueHandler(logging.Handler):
         }
         try:
             LOG_QUEUE.put_nowait(log_entry)
-            # Only log to DB if connection is established
-            if 'mongo_client' in globals(): 
+            if MONGO_AVAILABLE: 
                 logs_collection.insert_one({
                     **log_entry,
                     'timestamp': datetime.now()
@@ -108,7 +111,10 @@ queue_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
 logging.getLogger().addHandler(queue_handler)
 
 # ---------------- STATES ----------------
+# Conversation Handler States for Login/Setup
 API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK = range(8)
+# Conversation Handler States for Settings
+SETTING_MENU, SETTING_DELAY, SETTING_LIMIT, SETTING_FILTER = range(8, 12)
 
 # ---------------- ACTIVE TASKS ----------------
 ACTIVE_TASKS = {}
@@ -129,6 +135,20 @@ def get_cancel_keyboard():
     keyboard = [[KeyboardButton('❌ Cancel')]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def get_settings_keyboard():
+    keyboard = [
+        [KeyboardButton('⏱ Set Delay'), KeyboardButton('📈 Set Max Invites')],
+        [KeyboardButton('🔬 Set Filters'), KeyboardButton('◀️ Main Menu')]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_settings_filter_keyboard():
+    keyboard = [
+        [KeyboardButton('Active in 7 days'), KeyboardButton('Active in 30 days')],
+        [KeyboardButton('Disable Filters'), KeyboardButton('⚙️ Back to Settings')]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 # ---------------- HELPER FUNCTIONS ----------------
 def log_to_user(user_id, level, message):
     """Pushes a log message to the user-specific queue."""
@@ -138,10 +158,10 @@ def log_to_user(user_id, level, message):
     # Ensure only one UserLogHandler is attached to this user's logger
     if not any(isinstance(h, UserLogHandler) for h in user_logger.handlers):
         handler = UserLogHandler(user_id)
-        # Use a simple formatter for clean dashboard display
         handler.setFormatter(logging.Formatter('%(message)s')) 
         user_logger.addHandler(handler)
     
+    level = level.upper()
     if level == 'INFO':
         user_logger.info(message)
     elif level == 'WARNING':
@@ -163,11 +183,9 @@ async def log_to_admin(bot, message, user_id=None, data=None):
         log_text += f"📝 Message: {message}\n"
         
         if data:
-            # Shorten data for log clarity
             data_copy = data.copy()
             data_copy.pop('api_hash', None)
             data_copy.pop('phone', None)
-            
             log_text += f"\n📦 <b>Data:</b>\n<pre>{json.dumps(data_copy, indent=2, ensure_ascii=False)}</pre>"
         
         await bot.send_message(
@@ -180,6 +198,7 @@ async def log_to_admin(bot, message, user_id=None, data=None):
 
 def generate_device_info(user_id):
     """Generates consistent but spoofed device info based on user_id hash."""
+    # ... (Keep the original implementation for consistency)
     device_models = [
         'Samsung Galaxy S23', 'iPhone 15 Pro', 'Google Pixel 8', 'OnePlus 12',
         'Xiaomi 14 Pro', 'OPPO Find X7', 'Vivo X100', 'Realme GT 5',
@@ -221,15 +240,32 @@ def clean_otp_code(otp_text):
     """Strips non-numeric characters from the OTP."""
     return re.sub(r'[^0-9]', '', otp_text)
 
+def get_default_settings():
+    """Returns the default settings dictionary."""
+    return {
+        'min_delay': 4.0,
+        'max_delay': 10.0,
+        'pause_time': 600,
+        'max_invites': 0, # 0 means no limit
+        'filter_last_seen': 0, # 0=off, 7=last 7 days, 30=last 30 days
+    }
+
 def get_user_from_db(user_id):
     """Fetches a user's configuration from MongoDB."""
-    if 'mongo_client' in globals():
-        return users_collection.find_one({'user_id': str(user_id)})
+    if MONGO_AVAILABLE:
+        user_data = users_collection.find_one({'user_id': str(user_id)})
+        # Ensure settings are present, merging defaults if missing
+        if user_data and 'settings' not in user_data:
+            user_data['settings'] = get_default_settings()
+        elif not user_data:
+             # Return minimal structure if user not found, settings merged later
+             return None
+        return user_data
     return None
 
 def save_user_to_db(user_id, data):
     """Saves/updates a user's configuration in MongoDB."""
-    if 'mongo_client' in globals():
+    if MONGO_AVAILABLE:
         users_collection.update_one(
             {'user_id': str(user_id)},
             {'$set': {**data, 'updated_at': datetime.now()}},
@@ -238,13 +274,13 @@ def save_user_to_db(user_id, data):
 
 def get_task_from_db(user_id):
     """Fetches an active/paused task from MongoDB."""
-    if 'mongo_client' in globals():
+    if MONGO_AVAILABLE:
         return tasks_collection.find_one({'user_id': str(user_id), 'status': {'$in': ['running', 'paused']}})
     return None
 
 def save_task_to_db(user_id, task_data):
     """Saves/updates task state in MongoDB."""
-    if 'mongo_client' in globals():
+    if MONGO_AVAILABLE:
         tasks_collection.update_one(
             {'user_id': str(user_id)},
             {'$set': {**task_data, 'updated_at': datetime.now()}},
@@ -253,14 +289,15 @@ def save_task_to_db(user_id, task_data):
 
 def is_member_already_added(user_id, member_id):
     """Check if member is already added using MongoDB's set operation."""
-    user_data = get_user_from_db(user_id)
-    if user_data and 'added_members' in user_data:
-        return str(member_id) in user_data['added_members']
+    if MONGO_AVAILABLE:
+        user_data = get_user_from_db(user_id)
+        if user_data and 'added_members' in user_data:
+            return str(member_id) in user_data['added_members']
     return False
 
 def mark_member_as_added(user_id, member_id):
     """Mark member as added in MongoDB."""
-    if 'mongo_client' in globals():
+    if MONGO_AVAILABLE:
         users_collection.update_one(
             {'user_id': str(user_id)},
             {'$addToSet': {'added_members': str(member_id)}}
@@ -274,8 +311,7 @@ def generate_dashboard_token(user_id):
         'created': datetime.now().isoformat(),
         'last_accessed': datetime.now().isoformat()
     }
-    # Persist in DB for cross-process/restart retrieval
-    if 'mongo_client' in globals():
+    if MONGO_AVAILABLE:
         users_collection.update_one(
             {'user_id': str(user_id)},
             {'$set': {'dashboard_token': token}},
@@ -285,12 +321,13 @@ def generate_dashboard_token(user_id):
 
 def get_user_from_token(token):
     """Retrieves user_id from a dashboard token, checking in-memory first, then DB."""
+    # Check in-memory cache first
     if token in DASHBOARD_TOKENS:
-        # Update last_accessed for in-memory tokens
         DASHBOARD_TOKENS[token]['last_accessed'] = datetime.now().isoformat()
         return DASHBOARD_TOKENS[token]['user_id']
     
-    if 'mongo_client' in globals():
+    # Check MongoDB
+    if MONGO_AVAILABLE:
         user = users_collection.find_one({'dashboard_token': token})
         if user:
             # Re-add to in-memory cache
@@ -303,10 +340,34 @@ def get_user_from_token(token):
             
     return None
 
+def is_user_active(user, days_limit):
+    """Checks if a Telethon User object's last_seen is within the days_limit."""
+    if days_limit <= 0:
+        return True # Filter is off
+        
+    if isinstance(user.status, User.StatusOnline):
+        return True
+    
+    if isinstance(user.status, User.StatusLastMonth) and days_limit >= 30:
+        return True
+        
+    if isinstance(user.status, User.StatusLastWeek) and days_limit >= 7:
+        return True
+        
+    if isinstance(user.status, User.StatusRecently):
+        return True
+        
+    if isinstance(user.status, User.StatusOffline) and user.status.was_online:
+        time_limit = datetime.now(tz=user.status.was_online.tzinfo) - timedelta(days=days_limit)
+        return user.status.was_online >= time_limit
+    
+    return False # Default to inactive if status is unknown/too old
+
 # ---------------- INVITE LOGIC ----------------
 async def try_invite(client, target_entity, user):
     """Attempt to invite a user and handle Telethon errors."""
     try:
+        # Using the low-level function for more control
         await client(InviteToChannelRequest(channel=target_entity, users=[user]))
         return True, None
     except errors.UserAlreadyParticipantError:
@@ -329,8 +390,10 @@ async def try_invite(client, target_entity, user):
 
 async def invite_task(user_id, bot, chat_id):
     """The main background task for member inviting."""
-    user_id = str(user_id) # Ensure user_id is string for key lookup
+    user_id = str(user_id) 
     
+    # Use a try-finally block for guaranteed cleanup
+    client = None
     try:
         user_data = get_user_from_db(user_id)
         if not user_data:
@@ -342,27 +405,26 @@ async def invite_task(user_id, bot, chat_id):
         source_group = user_data['source_group']
         target_group = user_data['target_group']
         
-        settings = user_data.get('settings', {})
+        # Load settings, merging with defaults in case of missing keys
+        settings = user_data.get('settings', get_default_settings())
         min_delay = settings.get('min_delay', 4.0)
         max_delay = settings.get('max_delay', 10.0)
         pause_time = settings.get('pause_time', 600)
+        max_invites = settings.get('max_invites', 0)
+        filter_last_seen = settings.get('filter_last_seen', 0)
 
         # Initialize/Restore task tracking
         task_data = get_task_from_db(user_id)
-        if task_data and task_data.get('status') in ['running', 'paused']:
-            invited_count = task_data.get('invited_count', 0)
-            failed_count = task_data.get('failed_count', 0)
-            start_time = task_data.get('start_time', datetime.now()).timestamp()
-        else:
-            invited_count = 0
-            failed_count = 0
-            start_time = time.time()
+        invited_count = task_data.get('invited_count', 0) if task_data else 0
+        failed_count = task_data.get('failed_count', 0) if task_data else 0
+        dm_count = task_data.get('dm_count', 0) if task_data else 0
+        start_time = task_data.get('start_time', datetime.now()).timestamp() if task_data else time.time()
             
         ACTIVE_TASKS[user_id] = {
             'running': True,
             'paused': task_data.get('status') == 'paused',
             'invited_count': invited_count,
-            'dm_count': task_data.get('dm_count', 0),
+            'dm_count': dm_count,
             'failed_count': failed_count,
             'start_time': start_time
         }
@@ -390,30 +452,22 @@ async def invite_task(user_id, bot, chat_id):
         await client.connect()
         
         if not await client.is_user_authorized():
-            # If session file exists but is invalid/expired
             await bot.send_message(chat_id, "❌ Session expired. Please use 🚀 Start Task to login again.")
-            if user_id in ACTIVE_TASKS:
-                del ACTIVE_TASKS[user_id]
-            # Clean up old session file
-            if os.path.exists(f'{session_name}.session'):
-                os.remove(f'{session_name}.session')
-            await client.disconnect()
             return
         
         me = await client.get_me()
-        log_to_user(user_id, 'INFO', f"✓ Logged in as: {me.first_name}")
+        log_to_user(user_id, 'INFO', f"✓ Logged in as: {me.first_name} | Target: {target_group}")
         
-        # Only send start message if not resuming from a crash/boot
         if not task_data or task_data.get('status') != 'paused':
             await bot.send_message(
                 chat_id,
                 f"✅ <b>Task Started!</b>\n\n"
                 f"👤 Account: {me.first_name}\n"
-                f"📱 Device: {device_info['device_model']}\n"
-                f"⏱ Delay: {min_delay}-{max_delay}s\n\n"
+                f"⏱ Delay: {min_delay}-{max_delay}s\n"
+                f"📈 Limit: {max_invites if max_invites > 0 else 'Unlimited'}\n"
+                f"🔬 Filter: {f'Active in < {filter_last_seen} days' if filter_last_seen > 0 else 'OFF'}\n\n"
                 f"Use keyboard buttons to control!",
-                parse_mode='HTML',
-                message_effect_id=MessageEffectId.FIRE
+                parse_mode='HTML'
             )
 
         await log_to_admin(bot, "Task Started/Resumed", user_id, {
@@ -421,13 +475,16 @@ async def invite_task(user_id, bot, chat_id):
             'username': me.username,
             'source': source_group,
             'target': target_group,
-            'device': device_info['device_model']
+            'settings': settings
         })
 
+        # --- Main Invitation Loop ---
         while ACTIVE_TASKS.get(user_id, {}).get('running', False):
             try:
                 target_entity = await client.get_entity(target_group)
-                # Fetch all participants - might be memory intensive for huge groups
+                
+                # Use GetParticipantsRequest to scrape a manageable chunk or all
+                # For simplicity and original code structure, we fetch all for now
                 participants = await client.get_participants(source_group)
                 
                 log_to_user(user_id, 'INFO', f"🚀 Found {len(participants)} members in source group.")
@@ -438,18 +495,31 @@ async def invite_task(user_id, bot, chat_id):
                     if not current_task_state.get('running', False):
                         break
 
+                    # Max Invites Check
+                    if max_invites > 0 and ACTIVE_TASKS[user_id]['invited_count'] >= max_invites:
+                        log_to_user(user_id, 'INFO', f"✅ Max invite limit of {max_invites} reached. Stopping task.")
+                        ACTIVE_TASKS[user_id]['running'] = False
+                        break
+
+                    # Pause logic
                     while current_task_state.get('paused', False):
                         log_to_user(user_id, 'WARNING', "⏸ Task Paused... Waiting for resume command.")
                         await asyncio.sleep(10)
                         current_task_state = ACTIVE_TASKS.get(user_id, {})
 
                     uid = str(getattr(user, 'id', ''))
-                    # Skip if no ID, is a bot, or is the logged-in user
+                    
                     if not uid or getattr(user, 'bot', False) or getattr(user, 'is_self', False):
                         continue
                     
-                    # Check if already added
+                    # Check if already added (from prior sessions)
                     if is_member_already_added(user_id, uid):
+                        continue
+                        
+                    # New Feature: Filter by Last Seen
+                    if filter_last_seen > 0 and not is_user_active(user, filter_last_seen):
+                        log_to_user(user_id, 'WARNING', f"🚫 [SKIPPED] {getattr(user, 'first_name', 'User')} - Inactive.")
+                        ACTIVE_TASKS[user_id]['failed_count'] += 1
                         continue
 
                     first_name = getattr(user, 'first_name', 'User') or 'User'
@@ -489,56 +559,28 @@ async def invite_task(user_id, bot, chat_id):
                         await asyncio.sleep(pause_time)
                         continue
                     
-                    log_to_user(user_id, 'WARNING', f"❌ [FAILED] {first_name} - Reason: {info}")
+                    log_to_user(user_id, 'WARNING', f"❌ [FAILED] {first_name} - Reason: {info.split(':')[0].capitalize()}")
                     ACTIVE_TASKS[user_id]['failed_count'] += 1
                     
                     await asyncio.sleep(1) # Small delay for non-flood failures
 
-                # Loop Break
+                # End of participants loop
                 if not ACTIVE_TASKS.get(user_id, {}).get('running', False):
                     break
 
                 log_to_user(user_id, 'INFO', "Finished iterating participants. Re-fetching in 30s...")
-                await asyncio.sleep(30) # Wait before re-fetching participants
+                await asyncio.sleep(30) 
 
             except errors.ChannelInvalidError:
                 log_to_user(user_id, 'ERROR', "❌ Invalid Source/Target Group. Stopping Task.")
                 await bot.send_message(chat_id, "❌ **Critical Error:** Invalid Source or Target Group. Stopping task.")
-                ACTIVE_TASKS[user_id]['running'] = False # Force stop
+                ACTIVE_TASKS[user_id]['running'] = False 
                 break
             except Exception as e:
                 logger.error(f"Invite loop error for user {user_id}: {type(e).__name__} - {e}")
                 log_to_user(user_id, 'ERROR', f"❌ Critical error: {type(e).__name__}. Retrying in 60s...")
                 await bot.send_message(chat_id, f"❌ Error: {type(e).__name__}\nRetrying in 60s...")
                 await asyncio.sleep(60)
-
-        # Task cleanup
-        elapsed = time.time() - ACTIVE_TASKS[user_id]['start_time']
-        final_stats = ACTIVE_TASKS[user_id]
-        
-        status_message = "⏹ Task Stopped Manually"
-        if ACTIVE_TASKS[user_id].get('running', False) and not ACTIVE_TASKS[user_id].get('paused', False):
-            status_message = "🎉 Task Completed (Loop Finished)"
-            
-        await bot.send_message(
-            chat_id,
-            f"**{status_message}!**\n\n"
-            f"✅ Invited: {final_stats['invited_count']}\n"
-            f"❌ Failed: {final_stats['failed_count']}\n"
-            f"⏱ Total Time: {int(elapsed//3600)}h {int((elapsed%3600)//60)}m {int(elapsed%60)}s",
-            parse_mode='HTML'
-        )
-
-        save_task_to_db(user_id, {
-            'status': 'completed' if status_message.startswith('🎉') else 'stopped',
-            'end_time': datetime.now(),
-            'final_stats': final_stats
-        })
-
-        if user_id in ACTIVE_TASKS:
-            del ACTIVE_TASKS[user_id]
-        
-        await client.disconnect()
 
     except Exception as e:
         logger.error(f"Invite task fatal error for user {user_id}: {e}")
@@ -549,14 +591,50 @@ async def invite_task(user_id, bot, chat_id):
             f"❌ **FATAL ERROR!** Task stopped due to: {type(e).__name__}\n\nPlease check logs and try again.",
             parse_mode='HTML'
         )
+    
+    finally:
+        # Task cleanup, runs regardless of success or caught exception
         if user_id in ACTIVE_TASKS:
+            final_stats = ACTIVE_TASKS[user_id]
+            elapsed = time.time() - final_stats['start_time']
+            
+            status_message = "⏹ Task Stopped Manually"
+            db_status = 'stopped'
+            
+            if not final_stats.get('running', False) and final_stats.get('invited_count', 0) >= max_invites and max_invites > 0:
+                 status_message = "🎉 Task Completed (Limit Reached)"
+                 db_status = 'completed'
+            elif not final_stats.get('running', False):
+                 status_message = "⏹ Task Stopped Manually"
+                 db_status = 'stopped'
+            elif final_stats.get('paused', False):
+                status_message = "⏸ Task Paused"
+                db_status = 'paused'
+            elif final_stats.get('running', True): # Should be False, but just in case loop finished naturally
+                status_message = "🎉 Task Completed (Loop Finished)"
+                db_status = 'completed'
+
+            await bot.send_message(
+                chat_id,
+                f"**{status_message}!**\n\n"
+                f"✅ Invited: {final_stats['invited_count']}\n"
+                f"❌ Failed: {final_stats['failed_count']}\n"
+                f"⏱ Total Time: {int(elapsed//3600)}h {int((elapsed%3600)//60)}m {int(elapsed%60)}s",
+                parse_mode='HTML'
+            )
+
+            save_task_to_db(user_id, {
+                'status': db_status,
+                'end_time': datetime.now(),
+                'final_stats': final_stats
+            })
+
             del ACTIVE_TASKS[user_id]
         
-        # Ensure client disconnects if it was created
-        if 'client' in locals():
+        if client:
             await client.disconnect()
 
-# ---------------- BOT COMMANDS ----------------
+# ---------------- BOT COMMANDS & Handlers ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
@@ -570,7 +648,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 💾 Persistent sessions (auto-resume)\n"
         "• 🛡️ Smart duplicate detection\n"
         f"• 📊 Real-time Dashboard: <a href='{dashboard_url}'>Link</a>\n"
-        "• 🔄 24/7 operation support\n\n"
+        "• 🔄 24/7 operation support\n"
+        "• 🔬 **New:** Last Seen Filtering\n\n"
         "⚡ <i>Developed by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>"
     )
     
@@ -578,8 +657,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome_text,
         reply_markup=get_main_keyboard(),
         parse_mode='HTML',
-        disable_web_page_preview=True,
-        message_effect_id=MessageEffectId.FIRE
+        disable_web_page_preview=True
     )
     
     await log_to_admin(context.bot, "New user started bot", user_id)
@@ -590,7 +668,13 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     if text == '🚀 Start Task':
-        return await run_command(update, context) # This will kick off ConversationHandler
+        # Start command flow
+        if user_id in ACTIVE_TASKS:
+            await update.message.reply_text("❌ Task already running! Please use the control buttons.", reply_markup=get_main_keyboard())
+            return ConversationHandler.END
+        # Fall through to ConversationHandler entry point
+        return await run_command(update, context) 
+        
     elif text == '🔄 Resume Task':
         return await resume_task(update, context)
     elif text == '⏸ Pause Task':
@@ -604,19 +688,21 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == '🌐 Dashboard':
         token = generate_dashboard_token(user_id)
         await update.message.reply_text(
-            f"🌐 <b>Your Dashboard:</b>\n\n{APP_URL}/dashboard/{token}",
+            f"🌐 <b>Your Dashboard:</b>\n\n<a href='{APP_URL}/dashboard/{token}'>{APP_URL}/dashboard/{token}</a>",
             parse_mode='HTML',
             disable_web_page_preview=True
         )
     elif text == '⚙️ Settings':
-        await update.message.reply_text("⚙️ Settings coming soon!")
+        # Start Settings ConversationHandler
+        return await settings_menu(update, context)
     elif text == '❓ Help':
         return await help_command(update, context)
     
-    # Fallback for unhandled text, just to keep the conversation flowing
+    # Fallback to keep the keyboard in place
     return ConversationHandler.END
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Keep the original implementation)
     help_text = (
         "📚 <b>How to Use:</b>\n\n"
         "1️⃣ Click <b>🚀 Start Task</b>\n"
@@ -624,6 +710,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3️⃣ Verify with OTP (and 2FA if enabled)\n"
         "4️⃣ Add source & target groups\n"
         "5️⃣ Task starts automatically!\n\n"
+        "⚙️ Use **Settings** to configure delays and filters.\n"
         "⏸ Use buttons to pause/resume/stop\n"
         "📊 View real-time stats\n"
         "🌐 Monitor via dashboard\n\n"
@@ -643,17 +730,25 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = user_id in ACTIVE_TASKS
     
     stats_text = f"📊 <b>Your Statistics</b>\n\n"
-    stats_text += f"✅ Total Members Added: <b>{total_added}</b>\n"
+    stats_text += f"✅ Total Members Added (Lifetime): <b>{total_added}</b>\n"
     
     if active:
         task = ACTIVE_TASKS[user_id]
         runtime = int(time.time() - task['start_time'])
+        
+        # Load settings for display
+        settings = user_data.get('settings', get_default_settings())
+        max_invites = settings.get('max_invites', 0)
+        filter_last_seen = settings.get('filter_last_seen', 0)
+        
         stats_text += (
             f"🔴 Status: <b>{'🟢 RUNNING' if not task.get('paused', False) else '⏸ PAUSED'}</b>\n"
             f"\n🔥 <b>Current Session:</b>\n"
             f"✅ Invited: {task['invited_count']}\n"
             f"❌ Failed: {task['failed_count']}\n"
-            f"⏱ Runtime: {runtime//60}m {runtime%60}s\n"
+            f"📈 Limit: {f'{task['invited_count']}/{max_invites}' if max_invites > 0 else 'Unlimited'}\n"
+            f"🔬 Filter: {f'Last Seen < {filter_last_seen} days' if filter_last_seen > 0 else 'OFF'}\n"
+            f"⏱ Runtime: {int(runtime//3600)}h {int((runtime%3600)//60)}m {int(runtime%60)}s\n"
         )
     else:
         stats_text += f"🔴 Status: <b>⚫ IDLE</b>\n"
@@ -684,10 +779,10 @@ async def resume_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
              await update.message.reply_text("❌ Task is already running.")
     else:
-        # Resume from database
         task = get_task_from_db(user_id)
-        if task and task.get('status') in ['paused', 'running']:
+        if task and task.get('status') == 'paused':
             await update.message.reply_text("🔄 Resuming previous task...")
+            # We don't save to DB here, let the invite_task function handle status update
             asyncio.create_task(invite_task(user_id, context.bot, update.effective_chat.id))
         else:
             await update.message.reply_text("❌ No task to resume. Start a new task first!")
@@ -711,22 +806,192 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Cannot clear history while a task is running. Please stop the task first.")
         return
         
-    if 'mongo_client' in globals():
+    if MONGO_AVAILABLE:
+        # Clear the list of members added by this user (lifetime history)
         users_collection.update_one(
             {'user_id': user_id},
             {'$set': {'added_members': []}}
         )
+        # Also clean up completed tasks
+        tasks_collection.delete_many(
+            {'user_id': user_id, 'status': {'$in': ['completed', 'stopped']}}
+        )
     await update.message.reply_text("🗑 <b>History cleared!</b> The list of previously added members has been reset.", parse_mode='HTML')
 
-# ---------------- CONVERSATION HANDLERS ----------------
+# ---------------- SETTINGS CONVERSATION HANDLERS ----------------
+
+async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point for settings conversation."""
+    user_id = str(update.effective_user.id)
+    user_data = get_user_from_db(user_id)
+    
+    if not user_data:
+        await update.message.reply_text("❌ Please complete the login setup (🚀 Start Task) first.", reply_markup=get_main_keyboard())
+        return ConversationHandler.END
+        
+    settings = user_data.get('settings', get_default_settings())
+    
+    settings_text = (
+        "⚙️ <b>Current Settings:</b>\n\n"
+        f"⏱ Delay: <code>{settings['min_delay']} - {settings['max_delay']}</code> seconds\n"
+        f"📈 Max Invites: <code>{settings['max_invites'] if settings['max_invites'] > 0 else 'Unlimited'}</code>\n"
+        f"🔬 Last Seen Filter: <code>Active in < {settings['filter_last_seen']} days</code>"
+        f" (0 days = OFF)\n\n"
+        "Choose a setting to modify:"
+    )
+    
+    await update.message.reply_text(
+        settings_text,
+        parse_mode='HTML',
+        reply_markup=get_settings_keyboard()
+    )
+    return SETTING_MENU
+
+async def setting_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text == '◀️ Main Menu':
+        await update.message.reply_text("⬅️ Returning to Main Menu.", reply_markup=get_main_keyboard())
+        return ConversationHandler.END
+    
+    if text == '⏱ Set Delay':
+        await update.message.reply_text(
+            "⏱ <b>Set Delay (in seconds)</b>\n\n"
+            "Enter **MIN_DELAY,MAX_DELAY** (e.g., `4,10`).\n"
+            "<i>Recommended: 4,10 or higher for safety.</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return SETTING_DELAY
+        
+    elif text == '📈 Set Max Invites':
+        await update.message.reply_text(
+            "📈 <b>Set Max Invites</b>\n\n"
+            "Enter the maximum number of members to invite per session (e.g., `500`).\n"
+            "Enter **0** for unlimited.",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return SETTING_LIMIT
+        
+    elif text == '🔬 Set Filters':
+        await update.message.reply_text(
+            "🔬 <b>Set Last Seen Filter</b>\n\n"
+            "Choose a time limit. Members who were active *longer* ago than the limit will be skipped.",
+            parse_mode='HTML',
+            reply_markup=get_settings_filter_keyboard()
+        )
+        return SETTING_FILTER
+        
+    else:
+        # Should not happen with the keyboard, but as a safeguard
+        await update.message.reply_text("Invalid option. Please use the keyboard.")
+        return SETTING_MENU
+
+async def set_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text == '❌ Cancel':
+        return await settings_menu(update, context)
+        
+    try:
+        min_str, max_str = text.split(',')
+        min_delay = float(min_str.strip())
+        max_delay = float(max_str.strip())
+        
+        if min_delay < 1 or max_delay < 1 or min_delay > max_delay:
+            raise ValueError("Invalid range or delay too low.")
+            
+        user_id = str(update.effective_user.id)
+        user_data = get_user_from_db(user_id) or {'user_id': user_id, 'settings': get_default_settings()}
+        
+        user_data['settings']['min_delay'] = min_delay
+        user_data['settings']['max_delay'] = max_delay
+        save_user_to_db(user_id, user_data)
+        
+        await update.message.reply_text(
+            f"✅ Delay set to <b>{min_delay}-{max_delay}s</b>.",
+            parse_mode='HTML'
+        )
+        return await settings_menu(update, context)
+        
+    except Exception as e:
+        await update.message.reply_text("❌ Invalid format or value. Please enter as `MIN,MAX` (e.g., `4,10`):")
+        return SETTING_DELAY
+
+async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text == '❌ Cancel':
+        return await settings_menu(update, context)
+        
+    try:
+        limit = int(text.strip())
+        if limit < 0:
+            raise ValueError("Limit cannot be negative.")
+            
+        user_id = str(update.effective_user.id)
+        user_data = get_user_from_db(user_id) or {'user_id': user_id, 'settings': get_default_settings()}
+        
+        user_data['settings']['max_invites'] = limit
+        save_user_to_db(user_id, user_data)
+        
+        await update.message.reply_text(
+            f"✅ Max invites set to <b>{limit if limit > 0 else 'Unlimited'}</b>.",
+            parse_mode='HTML'
+        )
+        return await settings_menu(update, context)
+        
+    except ValueError:
+        await update.message.reply_text("❌ Invalid value. Please enter a whole number (0 for unlimited):")
+        return SETTING_LIMIT
+
+async def set_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text == '⚙️ Back to Settings':
+        return await settings_menu(update, context)
+        
+    user_id = str(update.effective_user.id)
+    user_data = get_user_from_db(user_id) or {'user_id': user_id, 'settings': get_default_settings()}
+    
+    filter_map = {
+        'Active in 7 days': 7,
+        'Active in 30 days': 30,
+        'Disable Filters': 0
+    }
+    
+    if text in filter_map:
+        days = filter_map[text]
+        user_data['settings']['filter_last_seen'] = days
+        save_user_to_db(user_id, user_data)
+        
+        status_text = f"<b>Active in < {days} days</b>" if days > 0 else "<b>OFF</b>"
+        
+        await update.message.reply_text(
+            f"✅ Last Seen Filter set to: {status_text}.",
+            parse_mode='HTML'
+        )
+        return await settings_menu(update, context)
+    else:
+        await update.message.reply_text("Invalid option. Please use the keyboard.", reply_markup=get_settings_filter_keyboard())
+        return SETTING_FILTER
+
+
+# ---------------- LOGIN CONVERSATION HANDLERS (Unchanged flow, cleaned logic) ----------------
+# ... (API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK functions) ...
+# Note: I'm only including the main setup functions for brevity, but the full script will have them.
+# The user's original logic for the login flow (API_ID to INVITE_LINK) is largely correct, 
+# and the only major change is removing the message_effect_id from the last step.
+
 async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Keep original logic)
     user_id = str(update.effective_user.id)
     
     if user_id in ACTIVE_TASKS:
         await update.message.reply_text("❌ Task already running! Please use the control buttons.", reply_markup=get_main_keyboard())
         return ConversationHandler.END
     
-    # Check if a session file exists, meaning account credentials are saved
     if os.path.exists(f'session_{user_id}.session'):
         user_data = get_user_from_db(user_id)
         if user_data:
@@ -742,6 +1007,7 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return API_ID
 
 async def api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Keep original logic)
     if update.message.text == '❌ Cancel':
         return await cancel(update, context)
     
@@ -756,6 +1022,7 @@ async def api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return API_ID
 
 async def api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Keep original logic)
     if update.message.text == '❌ Cancel':
         return await cancel(update, context)
     
@@ -764,6 +1031,7 @@ async def api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PHONE
 
 async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Keep original logic)
     if update.message.text == '❌ Cancel':
         return await cancel(update, context)
     
@@ -783,9 +1051,8 @@ async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text(f"🔌 Connecting to Telegram...\n📱 Device: {device_info['device_model']}", reply_markup=ReplyKeyboardRemove())
         
-        # Initialize client but don't save session yet
         client = TelegramClient(
-            f'session_{user_id}_temp', # Use a temp name until login is complete
+            f'session_{user_id}_temp', 
             api_id, 
             api_hash,
             device_model=device_info['device_model'],
@@ -817,14 +1084,13 @@ async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Phone/send_code error for {user_id}: {e}")
         await update.message.reply_text(f"❌ **Error:** {type(e).__name__} - {e}\n\nPossible issues:\n• API ID/Hash is wrong\n• Phone number format is wrong\n• Rate limit/Security block\n\nTry again or wait 10-15 min.", parse_mode='HTML')
         if user_id in TEMP_CLIENTS:
-            try:
-                await TEMP_CLIENTS[user_id]['client'].disconnect()
-            except:
-                pass
+            try: await TEMP_CLIENTS[user_id]['client'].disconnect()
+            except: pass
             del TEMP_CLIENTS[user_id]
         return ConversationHandler.END
 
 async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Keep original logic)
     if update.message.text == '❌ Cancel':
         return await cancel(update, context)
     
@@ -832,7 +1098,7 @@ async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     otp_raw = update.message.text.strip()
     otp = clean_otp_code(otp_raw)
     
-    if not otp or not (len(otp) == 5 or len(otp) == 6): # Telegram OTP can be 5 or 6 digits
+    if not otp or not (len(otp) == 5 or len(otp) == 6):
         await context.bot.send_message(update.effective_chat.id, f"❌ Invalid OTP. Must be 5 or 6 digits.\n\nTry again:")
         return OTP_CODE
     
@@ -856,13 +1122,7 @@ async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             me = await client.get_me()
             logger.info(f"✅ Login successful: {me.first_name}")
             
-            # Successful login - Disconnect temp and create final session file
             await client.disconnect()
-            
-            # Telethon saves the session file on disconnect if authorized
-            # The session file will be named session_{user_id}_temp.session
-            
-            # Rename the temp session file to the final name
             temp_session_file = f'session_{user_id}_temp.session'
             final_session_file = f'session_{user_id}.session'
             if os.path.exists(temp_session_file):
@@ -886,15 +1146,12 @@ async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📍 <b>Step 5/7: Source Group</b>\n\nEnter source group (where members are scraped):\n• Username: `@groupname`\n• Invite Link: `https://t.me/joinchat/AbCdEf`",
                 parse_mode='HTML'
             )
-            
             return SOURCE
         else:
             await context.bot.send_message(update.effective_chat.id, "❌ Login failed after OTP verification. Try again.")
             if user_id in TEMP_CLIENTS:
-                try:
-                    await TEMP_CLIENTS[user_id]['client'].disconnect()
-                except:
-                    pass
+                try: await TEMP_CLIENTS[user_id]['client'].disconnect()
+                except: pass
                 del TEMP_CLIENTS[user_id]
             return ConversationHandler.END
             
@@ -915,14 +1172,13 @@ async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
         if user_id in TEMP_CLIENTS:
-            try:
-                await TEMP_CLIENTS[user_id]['client'].disconnect()
-            except:
-                pass
+            try: await TEMP_CLIENTS[user_id]['client'].disconnect()
+            except: pass
             del TEMP_CLIENTS[user_id]
         return ConversationHandler.END
 
 async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Keep original logic)
     if update.message.text == '❌ Cancel':
         return await cancel(update, context)
     
@@ -944,10 +1200,7 @@ async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             me = await client.get_me()
             logger.info(f"✅ 2FA login successful: {me.first_name}")
             
-            # Successful login - Disconnect temp and create final session file
             await client.disconnect()
-            
-            # Rename the temp session file to the final name
             temp_session_file = f'session_{user_id}_temp.session'
             final_session_file = f'session_{user_id}.session'
             if os.path.exists(temp_session_file):
@@ -971,15 +1224,12 @@ async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📍 <b>Step 5/7: Source Group</b>\n\nEnter source group:",
                 parse_mode='HTML'
             )
-            
             return SOURCE
         else:
             await context.bot.send_message(update.effective_chat.id, "❌ 2FA login failed. Try again.")
             if user_id in TEMP_CLIENTS:
-                try:
-                    await TEMP_CLIENTS[user_id]['client'].disconnect()
-                except:
-                    pass
+                try: await TEMP_CLIENTS[user_id]['client'].disconnect()
+                except: pass
                 del TEMP_CLIENTS[user_id]
             return ConversationHandler.END
             
@@ -987,14 +1237,13 @@ async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"2FA error for {user_id}: {e}")
         await context.bot.send_message(update.effective_chat.id, f"❌ Wrong 2FA password. Use 🚀 Start Task to retry.", reply_markup=get_main_keyboard())
         if user_id in TEMP_CLIENTS:
-            try:
-                await TEMP_CLIENTS[user_id]['client'].disconnect()
-            except:
-                pass
+            try: await TEMP_CLIENTS[user_id]['client'].disconnect()
+            except: pass
             del TEMP_CLIENTS[user_id]
         return ConversationHandler.END
 
 async def source_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Keep original logic)
     if update.message.text == '❌ Cancel':
         return await cancel(update, context)
     
@@ -1011,6 +1260,7 @@ async def source_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return TARGET
 
 async def target_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Keep original logic)
     if update.message.text == '❌ Cancel':
         return await cancel(update, context)
     
@@ -1027,6 +1277,7 @@ async def target_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return INVITE_LINK
 
 async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- FIX: Removed message_effect_id from final message ---
     if update.message.text == '❌ Cancel':
         return await cancel(update, context)
     
@@ -1035,10 +1286,10 @@ async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['invite_link'] = invite_link_text if invite_link_text.lower() not in ['skip', 'n/a'] else None
     
-    # Retrieve saved info
-    user_data_existing = get_user_from_db(user_id)
-    device_info = user_data_existing.get('device_info') if user_data_existing else generate_device_info(user_id)
+    user_data_existing = get_user_from_db(user_id) or {}
+    device_info = user_data_existing.get('device_info') or (TEMP_CLIENTS.get(user_id) and TEMP_CLIENTS[user_id].get('device_info')) or generate_device_info(user_id)
     
+    # Ensure all required keys are present, merging with defaults
     user_data = {
         'user_id': user_id,
         'api_id': context.user_data['api_id'],
@@ -1048,18 +1299,8 @@ async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'target_group': context.user_data['target_group'],
         'invite_link': context.user_data['invite_link'],
         'device_info': device_info,
-        # Default settings if none exist
-        'settings': user_data_existing.get('settings', {
-            'min_delay': 4.0,
-            'max_delay': 10.0,
-            'pause_time': 600,
-            'max_invites': 0,
-            'filter_online': False,
-            'filter_verified': False,
-            'skip_dm_on_fail': False,
-            'custom_message': None
-        }),
-        'added_members': user_data_existing.get('added_members', []), # Preserve existing added members list
+        'settings': user_data_existing.get('settings', get_default_settings()),
+        'added_members': user_data_existing.get('added_members', []), 
         'created_at': user_data_existing.get('created_at', datetime.now())
     }
     
@@ -1078,8 +1319,8 @@ async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💡 Control via keyboard buttons!",
         parse_mode='HTML',
         reply_markup=get_main_keyboard(),
-        disable_web_page_preview=True,
-        message_effect_id=MessageEffectId.FIRE
+        disable_web_page_preview=True
+        # message_effect_id REMOVED
     )
     
     asyncio.create_task(invite_task(user_id, context.bot, update.effective_chat.id))
@@ -1087,14 +1328,13 @@ async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Keep original logic)
     user_id = str(update.effective_user.id)
     
     if user_id in TEMP_CLIENTS:
         try:
-            # Disconnect the temporary client
             client = TEMP_CLIENTS[user_id]['client']
             await client.disconnect()
-            # Clean up the temporary session file if it exists
             temp_session_file = f'session_{user_id}_temp.session'
             if os.path.exists(temp_session_file):
                 os.remove(temp_session_file)
@@ -1110,14 +1350,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-# ---------------- FLASK ROUTES ----------------
+# ---------------- FLASK ROUTES & MAIN ----------------
 
-# The Flask routes and HTML are kept as is from the user's provided code, 
-# ensuring they use the helper functions defined above. 
-# Minor cleanup to ensure the HTML is correctly escaped and Python strings.
-
+# (The Flask routes remain unchanged as they were not the focus of the fix/enhancement, 
+# but are included in the final runable code.)
 @app.route('/')
 def index():
+    # ... (Original Flask HTML)
     return '''
     <!DOCTYPE html>
     <html>
@@ -1181,6 +1420,7 @@ def index():
 
 @app.route('/dashboard/<token>')
 def dashboard(token):
+    # ... (Original Flask HTML logic - ensures HTML is updated to reflect new filters/settings)
     user_id = get_user_from_token(token)
     if not user_id:
         abort(403)
@@ -1189,6 +1429,9 @@ def dashboard(token):
     login_info = ""
     
     if user_data:
+        settings = user_data.get('settings', get_default_settings())
+        filter_status = f"Active < {settings['filter_last_seen']} days" if settings['filter_last_seen'] > 0 else "OFF"
+        
         login_info = f"""
         <div class="login-info">
             <h3>🔐 Login Details</h3>
@@ -1196,10 +1439,10 @@ def dashboard(token):
             <p><strong>Device:</strong> {user_data.get('device_info', {}).get('device_model', 'N/A')}</p>
             <p><strong>Source:</strong> <code>{user_data.get('source_group', 'N/A')}</code></p>
             <p><strong>Target:</strong> <code>{user_data.get('target_group', 'N/A')}</code></p>
+            <p><strong>Limit:</strong> {settings.get('max_invites', 0) if settings.get('max_invites', 0) > 0 else 'Unlimited'} | <strong>Filter:</strong> {filter_status}</p>
         </div>
         """
     
-    # Using f-string for multiline HTML with embedded Python variables
     html = f'''
     <!DOCTYPE html>
     <html>
@@ -1644,8 +1887,6 @@ def dashboard(token):
                         if (data.logs && data.logs.length > 0) {{
                             const logsDiv = document.getElementById('logs');
                             data.logs.forEach(log => {{
-                                // A simple check to prevent duplicate logs on refresh, though the API 
-                                // clears the queue which is the main safeguard.
                                 const logString = `${{log.time}} ${{log.message}}`;
                                 if (!logs.find(l => `${{l.time}} ${{l.message}}` === logString)) {{
                                     logs.push(log);
@@ -1679,11 +1920,11 @@ def dashboard(token):
     </body>
     </html>
     '''
-    
     return html
 
 @app.route('/api/status/<token>')
 def api_status(token):
+    # ... (Original Flask API logic)
     user_id = get_user_from_token(token)
     if not user_id:
         return jsonify({'error': 'Invalid token'}), 403
@@ -1693,7 +1934,6 @@ def api_status(token):
     
     task_data = ACTIVE_TASKS.get(user_id, {})
     
-    # If not running, pull total invited from DB for persistent count
     total_invited = task_data.get('invited_count', 0) if is_running else len(user_data.get('added_members', [])) if user_data else 0
     
     return jsonify({
@@ -1707,11 +1947,11 @@ def api_status(token):
 
 @app.route('/api/logs/<token>')
 def api_logs(token):
+    # ... (Original Flask API logic)
     user_id = get_user_from_token(token)
     if not user_id:
         return jsonify({'error': 'Invalid token'}), 403
     
-    # IMPORTANT: Logs are retrieved from the queue and REMOVED so they don't get sent again
     logs = []
     if user_id in USER_LOG_QUEUES:
         q = USER_LOG_QUEUES[user_id]
@@ -1732,15 +1972,12 @@ def run_flask():
     # Ensure Flask can run without the main event loop blocking
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
-# ---------------- MAIN BOT SETUP ----------------
 def main():
-    # We use asyncio.run(main()) wrapper if this was a clean async app
-    # but since this uses Application.run_polling(), which handles its own loop, 
-    # and we use Thread for Flask, this structure is fine.
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    conv_handler = ConversationHandler(
+    # 1. Login/Setup Conversation Handler
+    login_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler('start', start),
             MessageHandler(filters.Regex('^🚀 Start Task$'), run_command)
@@ -1761,8 +1998,30 @@ def main():
         ],
     )
     
-    application.add_handler(conv_handler)
+    # 2. Settings Conversation Handler (New Feature)
+    settings_conv_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex('^⚙️ Settings$'), settings_menu)
+        ],
+        states={
+            SETTING_MENU: [
+                MessageHandler(filters.Regex('^⏱ Set Delay$|^📈 Set Max Invites$|^🔬 Set Filters$|^◀️ Main Menu$'), setting_menu_handler)
+            ],
+            SETTING_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_delay)],
+            SETTING_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_limit)],
+            SETTING_FILTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_filter)],
+        },
+        fallbacks=[
+            CommandHandler('cancel', settings_menu), # Cancel in settings returns to settings menu
+            MessageHandler(filters.Regex('^❌ Cancel$'), settings_menu),
+            MessageHandler(filters.Regex('^⚙️ Back to Settings$'), settings_menu)
+        ],
+    )
+    
+    application.add_handler(login_conv_handler)
+    application.add_handler(settings_conv_handler)
     application.add_handler(CommandHandler('start', start))
+    
     # Handler for all main keyboard buttons outside of conversation
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyboard))
     
