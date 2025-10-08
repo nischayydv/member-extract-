@@ -746,35 +746,34 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Original problematic line (752):
         # f"📈 Limit: {f'{task["invited_count"]}/{max_invites}' if max_invites > 0 else 'Unlimited'}\n"
         # Corrected line:
-status = "🟢 RUNNING" if not task.get("paused", False) else "⏸ PAUSED"
-invited = task["invited_count"]
-failed = task["failed_count"]
+    status = "🟢 RUNNING" if not task.get("paused", False) else "⏸ PAUSED"
+    invited = task["invited_count"]
+    failed = task["failed_count"]
 
-if max_invites > 0:
-    limit_text = f"{invited}/{max_invites}"
-else:
-    limit_text = "Unlimited"
+    if max_invites > 0:
+        limit_text = f"{invited}/{max_invites}"
+    else:
+        limit_text = "Unlimited"
 
-if filter_last_seen > 0:
-    filter_text = f"Last Seen < {filter_last_seen} days"
-else:
-    filter_text = "OFF"
+    if filter_last_seen > 0:
+        filter_text = f"Last Seen < {filter_last_seen} days"
+    else:
+        filter_text = "OFF"
 
-runtime_text = f"{int(runtime // 3600)}h {int((runtime % 3600) // 60)}m {int(runtime % 60)}s"
+    runtime_text = f"{int(runtime // 3600)}h {int((runtime % 3600) // 60)}m {int(runtime % 60)}s"
 
-stats_text += (
-    f"🔴 Status: <b>{status}</b>\n"
-    f"\n🔥 <b>Current Session:</b>\n"
-    f"✅ Invited: {invited}\n"
-    f"❌ Failed: {failed}\n"
-    f"📈 Limit: {limit_text}\n"
-    f"🔬 Filter: {filter_text}\n"
-    f"⏱ Runtime: {runtime_text}\n"
-)
+    stats_text += (
+        f"🔴 Status: <b>{status}</b>\n"
+        f"\n🔥 <b>Current Session:</b>\n"
+        f"✅ Invited: {invited}\n"
+        f"❌ Failed: {failed}\n"
+        f"📈 Limit: {limit_text}\n"
+        f"🔬 Filter: {filter_text}\n"
+        f"⏱ Runtime: {runtime_text}\n"
+    )
 else:
     stats_text += "🔴 Status: <b>⚫ IDLE</b>\n"
-    await update.message.reply_text(stats_text, parse_mode='HTML')
-
+    
 async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
