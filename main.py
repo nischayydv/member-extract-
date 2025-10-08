@@ -749,7 +749,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Invited: {task['invited_count']}\n"
             f"❌ Failed: {task['failed_count']}\n"
             # FIX: Changed ' to " for dictionary key access inside the f-string.
-            f"📈 Limit: {f'{task["invited_count"]}/{max_invites}' if max_invites > 0 else 'Unlimited'}\n"
+            # The quotes around the dictionary key are changed from " to '
+            f"📈 Limit: {f'{task[\'invited_count\']}/{max_invites}' if max_invites > 0 else 'Unlimited'}\n"
+
             f"🔬 Filter: {f'Last Seen < {filter_last_seen} days' if filter_last_seen > 0 else 'OFF'}\n"
             f"⏱ Runtime: {int(runtime//3600)}h {int((runtime%3600)//60)}m {int(runtime%60)}s\n"
         )
