@@ -1976,11 +1976,14 @@ def main():
         ],
     )
     
+    # Add handlers# ... (around line 1980)
     # Add handlers
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('
             f"🌐 <b>Your Dashboard:</b>\n\n<code>{dashboard_url}</code>\n\n"
+# ... (rest of the code)
+
             f"Copy the link and open in browser to monitor your tasks in real-time!",
             parse_mode='HTML',
             reply_markup=get_main_keyboard()
