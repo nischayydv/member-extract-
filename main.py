@@ -17,7 +17,7 @@ from telegram.ext import (
     Application, CommandHandler, ConversationHandler, 
     MessageHandler, filters, ContextTypes
 )
-from telegram.constants import MessageEffectId
+
 from flask import Flask, render_template_string, jsonify, Response, request, abort
 from pymongo import MongoClient
 import queue
@@ -334,8 +334,7 @@ async def invite_task(user_id, bot, chat_id):
             f"📍 Source: {source_group}\n"
             f"🎯 Target: {target_group}\n\n"
             f"Use keyboard buttons to control!",
-            parse_mode='HTML',
-            message_effect_id=MessageEffectId.FIRE
+            parse_mode='HTML'
         )
 
         await log_to_admin(bot, "🚀 Task Started", user_id, {
@@ -445,8 +444,7 @@ async def invite_task(user_id, bot, chat_id):
             f"⏱ Total Time: {int(elapsed//60)}m {int(elapsed%60)}s\n"
             f"📊 Members Added: {len(get_user_from_db(user_id).get('added_members', []))}\n\n"
             f"⚡ Bot by @NY_BOTS",
-            parse_mode='HTML',
-            message_effect_id=MessageEffectId.FIRE
+            parse_mode='HTML'
         )
 
         save_task_to_db(user_id, {
@@ -498,8 +496,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome_text,
         reply_markup=get_main_keyboard(),
         parse_mode='HTML',
-        disable_web_page_preview=True,
-        message_effect_id=MessageEffectId.FIRE
+        disable_web_page_preview=True
     )
     
     await log_to_admin(context.bot, f"New user started bot", user_id, {
@@ -1115,8 +1112,7 @@ async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Use ⏸ ▶️ ⏹ to control task\n\n"
         "⚡ <i>Bot by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>",
         parse_mode='HTML',
-        reply_markup=get_main_keyboard(),
-        message_effect_id=MessageEffectId.FIRE
+        reply_markup=get_main_keyboard()
     )
     
     asyncio.create_task(invite_task(user_id, context.bot, update.effective_chat.id))
