@@ -1976,14 +1976,19 @@ def main():
         ],
     )
     
-    # Add handlers# ... (around line 1980)
-    # Add handlers
+# Add handlers
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('
-            f"🌐 <b>Your Dashboard:</b>\n\n<code>{dashboard_url}</code>\n\n"
-# ... (rest of the code)
+    application.add_handler(CommandHandler('dashboard', dashboard_command))
+    application.add_handler(CommandHandler('settings', settings_command))
+    application.add_handler(CommandHandler('reset', reset_session))
+    application.add_handler(CommandHandler('help', help_command))
 
+    # Handle text-based buttons
+    if text == '🌐 Dashboard':
+        dashboard_url = "https://yourdashboardurl.com"  # replace with your real link
+        await update.message.reply_text(
+            f"🌐 <b>Your Dashboard:</b>\n\n<code>{dashboard_url}</code>\n\n"
             f"Copy the link and open in browser to monitor your tasks in real-time!",
             parse_mode='HTML',
             reply_markup=get_main_keyboard()
@@ -2005,7 +2010,7 @@ def main():
         return await change_pause_time(update, context)
     elif text == '📋 View Settings':
         return await view_settings(update, context)
-
+        
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
