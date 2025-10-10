@@ -95,7 +95,7 @@ queue_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
 logging.getLogger().addHandler(queue_handler)
 
 # ==================== STATES ====================
-API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK = range(8)
+API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK, SETTINGS_MENU, SET_MIN_DELAY, SET_MAX_DELAY, SET_PAUSE_TIME = range(12)
 
 # ==================== ACTIVE TASKS ====================
 ACTIVE_TASKS = {}
@@ -108,12 +108,19 @@ def get_main_keyboard():
         [KeyboardButton('⏸ Pause Task'), KeyboardButton('⏹ Stop Task')],
         [KeyboardButton('📊 Statistics'), KeyboardButton('🗑 Clear History')],
         [KeyboardButton('🌐 Dashboard'), KeyboardButton('⚙️ Settings')],
-        [KeyboardButton('❓ Help')]
+        [KeyboardButton('🔄 Reset Session'), KeyboardButton('❓ Help')]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 def get_cancel_keyboard():
     keyboard = [[KeyboardButton('❌ Cancel')]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_settings_keyboard():
+    keyboard = [
+        [KeyboardButton('⏱ Change Delays'), KeyboardButton('⏳ Change Pause Time')],
+        [KeyboardButton('📋 View Settings'), KeyboardButton('🔙 Back to Main')]
+    ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ==================== DATABASE FUNCTIONS ====================
@@ -350,6 +357,12 @@ async def invite_task(user_id, bot, chat_id):
         batch_count = 0
         while ACTIVE_TASKS.get(str(user_id), {}).get('running', False):
             try:
+                # Check pause state
+                while ACTIVE_TASKS.get(str(user_id), {}).get('paused', False):
+                    await asyncio.sleep(2)
+                    if not ACTIVE_TASKS.get(str(user_id), {}).get('running', False):
+                        break
+
                 target_entity = await client.get_entity(target_group)
                 participants = await client.get_participants(source_group)
                 
@@ -365,6 +378,8 @@ async def invite_task(user_id, bot, chat_id):
 
                     while ACTIVE_TASKS.get(str(user_id), {}).get('paused', False):
                         await asyncio.sleep(2)
+                        if not ACTIVE_TASKS.get(str(user_id), {}).get('running', False):
+                            break
 
                     uid = str(getattr(user, 'id', ''))
                     if not uid or getattr(user, 'bot', False) or getattr(user, 'is_self', False):
@@ -471,7 +486,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     token = generate_dashboard_token(user_id)
-    dashboard_url = f"{APP_URL}/dashboard/{token}"
     
     welcome_text = (
         "🔥 <b>Welcome to Premium Telegram Invite Bot!</b>\n\n"
@@ -524,17 +538,145 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token = generate_dashboard_token(user_id)
         dashboard_url = f"{APP_URL}/dashboard/{token}"
         await update.message.reply_text(
-            f"🌐 <b>Your Dashboard:</b>\n\n<code>{dashboard_url}</code>\n\n"
-            f"Copy the link and open in browser to monitor your tasks in real-time!",
+            f"✅ <b>Delays Updated!</b>\n\n"
+            f"⏱ Min Delay: {min_delay}s\n"
+            f"⏱ Max Delay: {max_delay}s\n\n"
+            f"New settings will apply to next task.",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        
+        await log_to_admin(context.bot, "⚙️ Settings Changed - Delays", user_id, {
+            'min_delay': min_delay,
+            'max_delay': max_delay
+        })
+        
+        return SETTINGS_MENU
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid number. Try again:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return SET_MAX_DELAY
+
+async def change_pause_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⏳ <b>Change Pause Time</b>\n\n"
+        "Enter pause time in minutes (e.g., 10 for 10 minutes):\n\n"
+        "This is used when PeerFlood is detected.",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    return SET_PAUSE_TIME
+
+async def set_pause_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_settings_keyboard())
+        return SETTINGS_MENU
+    
+    try:
+        pause_minutes = int(update.message.text.strip())
+        if pause_minutes < 1 or pause_minutes > 120:
+            await update.message.reply_text(
+                "❌ Invalid value. Must be between 1-120 minutes.\n\nTry again:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return SET_PAUSE_TIME
+        
+        pause_time = pause_minutes * 60
+        user_id = str(update.effective_user.id)
+        user_data = get_user_from_db(user_id)
+        
+        if user_data:
+            settings = user_data.get('settings', {})
+            settings['pause_time'] = pause_time
+            save_user_to_db(user_id, {'settings': settings})
+        
+        await update.message.reply_text(
+            f"✅ <b>Pause Time Updated!</b>\n\n"
+            f"⏳ Pause Time: {pause_minutes} minutes ({pause_time}s)\n\n"
+            f"This will be used when PeerFlood is detected.",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        
+        await log_to_admin(context.bot, "⚙️ Settings Changed - Pause Time", user_id, {
+            'pause_time_minutes': pause_minutes,
+            'pause_time_seconds': pause_time
+        })
+        
+        return SETTINGS_MENU
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid number. Try again:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return SET_PAUSE_TIME
+
+async def reset_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    
+    # Check if task is running
+    if user_id in ACTIVE_TASKS:
+        await update.message.reply_text(
+            "⚠️ <b>Cannot Reset Session</b>\n\n"
+            "Please stop the active task first using ⏹ Stop Task button.",
             parse_mode='HTML',
             reply_markup=get_main_keyboard()
         )
-    elif text == '⚙️ Settings':
-        await update.message.reply_text("⚙️ Settings coming soon!", reply_markup=get_main_keyboard())
-    elif text == '❓ Help':
-        return await help_command(update, context)
-    elif text == '❌ Cancel':
-        return await cancel(update, context)
+        return
+    
+    # Delete session file
+    session_file = f'session_{user_id}.session'
+    session_journal = f'session_{user_id}.session-journal'
+    
+    deleted = False
+    if os.path.exists(session_file):
+        try:
+            os.remove(session_file)
+            deleted = True
+        except Exception as e:
+            logger.error(f"Error deleting session file: {e}")
+    
+    if os.path.exists(session_journal):
+        try:
+            os.remove(session_journal)
+        except Exception as e:
+            logger.error(f"Error deleting session journal: {e}")
+    
+    # Clear user data from database
+    users_collection.update_one(
+        {'user_id': user_id},
+        {'$unset': {
+            'api_id': '',
+            'api_hash': '',
+            'phone': '',
+            'device_info': ''
+        }}
+    )
+    
+    if deleted:
+        await update.message.reply_text(
+            "✅ <b>Session Reset Complete!</b>\n\n"
+            "🗑 Session file deleted\n"
+            "🔄 Credentials cleared\n\n"
+            "Use 🚀 Start Task to login with a fresh session.",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        
+        await log_to_admin(context.bot, "🔄 Session Reset", user_id, {
+            'session_file': session_file,
+            'status': 'deleted'
+        })
+    else:
+        await update.message.reply_text(
+            "ℹ️ <b>No Session Found</b>\n\n"
+            "No active session to reset.\n\n"
+            "Use 🚀 Start Task to create a new session.",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
@@ -551,7 +693,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⏸ Pause Task - Pause without losing progress\n"
         "▶️ Resume Task - Continue from where you left\n"
         "⏹ Stop Task - Stop task completely\n"
-        "🗑 Clear History - Remove all added members\n\n"
+        "🗑 Clear History - Remove all added members\n"
+        "🔄 Reset Session - Delete session & start fresh\n\n"
+        "⚙️ <b>Settings:</b>\n"
+        "• Change minimum/maximum delays\n"
+        "• Adjust pause time for flood protection\n"
+        "• View current settings\n\n"
         "📊 <b>Dashboard:</b>\n"
         "• Real-time statistics\n"
         "• Live activity logs\n"
@@ -580,7 +727,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats_text = f"📊 <b>Your Statistics</b>\n\n"
     stats_text += f"✅ Total Members Added: <b>{total_added}</b>\n"
     stats_text += f"🔴 Status: <b>{'🟢 Running' if active else '⚫ Idle'}</b>\n"
-    stats_text += f"📅 Last Activity: <b>{user_data.get('updated_at', 'N/A')}</b>\n"
+    
+    if user_data.get('updated_at'):
+        stats_text += f"📅 Last Activity: <b>{user_data['updated_at'].strftime('%Y-%m-%d %H:%M:%S')}</b>\n"
     
     if active:
         task = ACTIVE_TASKS[user_id]
@@ -590,8 +739,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Invited: {task['invited_count']}\n"
             f"❌ Failed: {task['failed_count']}\n"
             f"⏱ Runtime: {runtime//60}m {runtime%60}s\n"
-            f"{'⏸ <b>PAUSED</b>' if task.get('paused') else '▶️ <b>RUNNING</b>'}\n"
         )
+        
+        if task.get('paused'):
+            stats_text += f"⏸ <b>STATUS: PAUSED</b>\n"
+        else:
+            stats_text += f"▶️ <b>STATUS: RUNNING</b>\n"
     
     await update.message.reply_text(stats_text, parse_mode='HTML', reply_markup=get_main_keyboard())
 
@@ -602,32 +755,63 @@ async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No active task to pause.", reply_markup=get_main_keyboard())
         return
     
+    if ACTIVE_TASKS[user_id].get('paused'):
+        await update.message.reply_text("ℹ️ Task is already paused!", reply_markup=get_main_keyboard())
+        return
+    
     ACTIVE_TASKS[user_id]['paused'] = True
-    save_task_to_db(user_id, {'status': 'paused'})
+    save_task_to_db(user_id, {'status': 'paused', 'paused_at': datetime.now()})
     log_to_user(user_id, 'WARNING', "⏸ Task paused by user")
-    await update.message.reply_text("⏸ <b>Task Paused</b>\n\nUse 🔄 Resume Task to continue", parse_mode='HTML', reply_markup=get_main_keyboard())
+    
+    await update.message.reply_text(
+        "⏸ <b>Task Paused</b>\n\n"
+        "The task has been paused successfully.\n"
+        "Use 🔄 Resume Task to continue.",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard()
+    )
+    
     await log_to_admin(context.bot, "⏸ Task Paused", user_id)
 
 async def resume_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     if user_id in ACTIVE_TASKS:
-        if ACTIVE_TASKS[user_id]['paused']:
+        if ACTIVE_TASKS[user_id].get('paused'):
             ACTIVE_TASKS[user_id]['paused'] = False
-            save_task_to_db(user_id, {'status': 'running'})
+            save_task_to_db(user_id, {'status': 'running', 'resumed_at': datetime.now()})
             log_to_user(user_id, 'INFO', "▶️ Task resumed by user")
-            await update.message.reply_text("▶️ <b>Task Resumed</b>", parse_mode='HTML', reply_markup=get_main_keyboard())
+            
+            await update.message.reply_text(
+                "▶️ <b>Task Resumed</b>\n\n"
+                "The task is now running again!",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+            
             await log_to_admin(context.bot, "▶️ Task Resumed", user_id)
         else:
-            await update.message.reply_text("ℹ️ Task is already running!", reply_markup=get_main_keyboard())
+            await update.message.reply_text(
+                "ℹ️ Task is already running!",
+                reply_markup=get_main_keyboard()
+            )
     else:
         task = get_task_from_db(user_id)
         if task and task.get('status') in ['paused', 'running']:
-            await update.message.reply_text("🔄 <b>Resuming previous task...</b>", parse_mode='HTML', reply_markup=get_main_keyboard())
+            await update.message.reply_text(
+                "🔄 <b>Resuming previous task...</b>\n\n"
+                "Please wait while we reconnect...",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
             asyncio.create_task(invite_task(user_id, context.bot, update.effective_chat.id))
             await log_to_admin(context.bot, "🔄 Task Resumed from Database", user_id)
         else:
-            await update.message.reply_text("❌ No task to resume. Start a new task!", reply_markup=get_main_keyboard())
+            await update.message.reply_text(
+                "❌ No task to resume.\n\n"
+                "Use 🚀 Start Task to begin a new task!",
+                reply_markup=get_main_keyboard()
+            )
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -637,19 +821,49 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     ACTIVE_TASKS[user_id]['running'] = False
-    save_task_to_db(user_id, {'status': 'stopped'})
+    ACTIVE_TASKS[user_id]['paused'] = False
+    save_task_to_db(user_id, {'status': 'stopped', 'stopped_at': datetime.now()})
     log_to_user(user_id, 'WARNING', "⏹ Task stopped by user")
-    await update.message.reply_text("⏹ <b>Task Stopping...</b>\n\nPlease wait for cleanup...", parse_mode='HTML', reply_markup=get_main_keyboard())
+    
+    await update.message.reply_text(
+        "⏹ <b>Task Stopping...</b>\n\n"
+        "The task is being stopped safely.\n"
+        "Please wait for cleanup to complete...",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard()
+    )
+    
     await log_to_admin(context.bot, "⏹ Task Stopped", user_id)
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
+    
+    user_data = get_user_from_db(user_id)
+    if not user_data:
+        await update.message.reply_text(
+            "ℹ️ No history to clear.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    member_count = len(user_data.get('added_members', []))
+    
     users_collection.update_one(
         {'user_id': user_id},
-        {'$set': {'added_members': []}}
+        {'$set': {'added_members': [], 'cleared_at': datetime.now()}}
     )
-    await update.message.reply_text("🗑 <b>History Cleared!</b>\n\nAll added members have been cleared.", parse_mode='HTML', reply_markup=get_main_keyboard())
-    await log_to_admin(context.bot, "🗑 History Cleared", user_id)
+    
+    await update.message.reply_text(
+        f"🗑 <b>History Cleared!</b>\n\n"
+        f"Removed {member_count} members from tracking.\n\n"
+        f"All members can now be invited again.",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard()
+    )
+    
+    await log_to_admin(context.bot, "🗑 History Cleared", user_id, {
+        'members_cleared': member_count
+    })
 
 # ==================== CONVERSATION HANDLERS ====================
 async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1751,6 +1965,10 @@ def main():
             SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, source_group)],
             TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, target_group)],
             INVITE_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, invite_link)],
+            SETTINGS_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyboard)],
+            SET_MIN_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_min_delay)],
+            SET_MAX_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_max_delay)],
+            SET_PAUSE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_pause_time)],
         },
         fallbacks=[
             MessageHandler(filters.Regex('^❌ Cancel$'), cancel),
@@ -1761,34 +1979,239 @@ def main():
     # Add handlers
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('help', help_command))
-    application.add_handler(CommandHandler('stats', stats_command))
-    application.add_handler(CommandHandler('clear', clear_command))
-    application.add_handler(CommandHandler('pause', pause_command))
-    application.add_handler(CommandHandler('resume', resume_task))
-    application.add_handler(CommandHandler('stop', stop_command))
+    application.add_handler(CommandHandler('
+            f"🌐 <b>Your Dashboard:</b>\n\n<code>{dashboard_url}</code>\n\n"
+            f"Copy the link and open in browser to monitor your tasks in real-time!",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+    elif text == '⚙️ Settings':
+        return await settings_command(update, context)
+    elif text == '🔄 Reset Session':
+        return await reset_session(update, context)
+    elif text == '❓ Help':
+        return await help_command(update, context)
+    elif text == '❌ Cancel':
+        return await cancel(update, context)
+    elif text == '🔙 Back to Main':
+        await update.message.reply_text("🏠 Back to main menu", reply_markup=get_main_keyboard())
+        return ConversationHandler.END
+    elif text == '⏱ Change Delays':
+        return await change_delays(update, context)
+    elif text == '⏳ Change Pause Time':
+        return await change_pause_time(update, context)
+    elif text == '📋 View Settings':
+        return await view_settings(update, context)
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    
+    await update.message.reply_text(
+        "⚙️ <b>Settings Menu</b>\n\n"
+        "Choose an option:",
+        parse_mode='HTML',
+        reply_markup=get_settings_keyboard()
+    )
+    return SETTINGS_MENU
+
+async def view_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    user_data = get_user_from_db(user_id)
+    
+    if not user_data:
+        await update.message.reply_text(
+            "❌ No settings found. Start a task first!",
+            reply_markup=get_settings_keyboard()
+        )
+        return SETTINGS_MENU
+    
+    settings = user_data.get('settings', {})
+    min_delay = settings.get('min_delay', 4.0)
+    max_delay = settings.get('max_delay', 10.0)
+    pause_time = settings.get('pause_time', 600)
+    
+    settings_text = (
+        "📋 <b>Current Settings:</b>\n\n"
+        f"⏱ <b>Min Delay:</b> {min_delay}s\n"
+        f"⏱ <b>Max Delay:</b> {max_delay}s\n"
+        f"⏳ <b>Pause Time:</b> {pause_time//60}m ({pause_time}s)\n\n"
+        "Use buttons to change settings."
+    )
+    
+    await update.message.reply_text(
+        settings_text,
+        parse_mode='HTML',
+        reply_markup=get_settings_keyboard()
+    )
+    return SETTINGS_MENU
+
+async def change_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⏱ <b>Change Delay Settings</b>\n\n"
+        "Enter the minimum delay in seconds (e.g., 4):",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    return SET_MIN_DELAY
+
+async def set_min_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_settings_keyboard())
+        return SETTINGS_MENU
+    
+    try:
+        min_delay = float(update.message.text.strip())
+        if min_delay < 1 or min_delay > 30:
+            await update.message.reply_text(
+                "❌ Invalid value. Must be between 1-30 seconds.\n\nTry again:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return SET_MIN_DELAY
+        
+        context.user_data['new_min_delay'] = min_delay
+        await update.message.reply_text(
+            f"✅ Min delay set to {min_delay}s\n\n"
+            "Now enter the maximum delay in seconds (e.g., 10):",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return SET_MAX_DELAY
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid number. Try again:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return SET_MIN_DELAY
+
+async def set_max_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_settings_keyboard())
+        return SETTINGS_MENU
+    
+    try:
+        max_delay = float(update.message.text.strip())
+        min_delay = context.user_data.get('new_min_delay', 4.0)
+        
+        if max_delay < min_delay:
+            await update.message.reply_text(
+                f"❌ Max delay must be greater than min delay ({min_delay}s).\n\nTry again:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return SET_MAX_DELAY
+        
+        if max_delay > 60:
+            await update.message.reply_text(
+                "❌ Max delay cannot exceed 60 seconds.\n\nTry again:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return SET_MAX_DELAY
+        
+        user_id = str(update.effective_user.id)
+        user_data = get_user_from_db(user_id)
+        
+        if user_data:
+            settings = user_data.get('settings', {})
+            settings['min_delay'] = min_delay
+            settings['max_delay'] = max_delay
+            save_user_to_db(user_id, {'settings': settings})
+        
+        await update.message.reply_text(
+            f"✅ <b>Delays Updated!</b>\n\n"
+            f"⏱ Min Delay: {min_delay}s\n"
+            f"⏱ Max Delay: {max_delay}s\n\n"
+            f"New settings will apply to next task.",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        
+        await log_to_admin(context.bot, "⚙️ Settings Changed - Delays", user_id, {
+            'min_delay': min_delay,
+            'max_delay': max_delay
+        })
+        
+        return SETTINGS_MENU
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid number. Try again:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return SET_MAX_DELAY
+
+# The following functions are already defined in the context:
+# change_pause_time
+# set_pause_time
+# reset_session
+# help_command
+# stats_command
+# pause_command
+# resume_task
+# stop_command
+# clear_command
+# run_command
+# api_id
+# api_hash
+# phone
+# otp_code
+# two_fa_password
+# source_group
+# target_group
+# invite_link
+# cancel
+# settings_command
+# view_settings
+# change_delays
+
+# ==================== MAIN FUNCTION ====================
+def main():
+    """Start the bot and Flask server"""
+    
+    # Create bot application
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Conversation handler for setup
+    conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler('start', start),
+            MessageHandler(filters.Regex('^🚀 Start Task$'), run_command),
+            MessageHandler(filters.Regex('^⚙️ Settings$'), settings_command), # Added entry point for settings
+            MessageHandler(filters.Regex('^⏱ Change Delays$'), change_delays), # Added entry point for delays
+            MessageHandler(filters.Regex('^⏳ Change Pause Time$'), change_pause_time) # Added entry point for pause time
+        ],
+        states={
+            API_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, api_id)],
+            API_HASH: [MessageHandler(filters.TEXT & ~filters.COMMAND, api_hash)],
+            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone)],
+            OTP_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, otp_code)],
+            TWO_FA_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, two_fa_password)],
+            SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, source_group)],
+            TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, target_group)],
+            INVITE_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, invite_link)],
+            SETTINGS_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyboard)],
+            SET_MIN_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_min_delay)],
+            SET_MAX_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_max_delay)],
+            SET_PAUSE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_pause_time)],
+        },
+        fallbacks=[
+            MessageHandler(filters.Regex('^❌ Cancel$'), cancel),
+            CommandHandler('cancel', cancel)
+        ],
+    )
+    
+    # Add handlers
+    application.add_handler(conv_handler)
+    
+    # General command and message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyboard))
     
-    # Start Flask in a separate thread
-    def run_flask():
-        app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
-    
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    logger.info(f"🚀 Bot started successfully!")
-    logger.info(f"🌐 Dashboard available at: {APP_URL}")
-    logger.info(f"📊 MongoDB connected")
-    logger.info(f"⚡ Developed by @NY_BOTS")
-    
-    # Start bot polling
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Run bot in a separate thread
+    bot_thread = Thread(target=lambda: application.run_polling(poll_interval=1.0))
+    bot_thread.start()
+
+    logger.info("🤖 Telegram Bot Polling Started.")
+
+    # Run Flask app for dashboard/health check
+    logger.info(f"🌐 Flask Server Starting on port {PORT}")
+    app.run(host='0.0.0.0', port=PORT, debug=False)
 
 if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.info("👋 Bot stopped by user")
-    except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
-        raise
+    main()
