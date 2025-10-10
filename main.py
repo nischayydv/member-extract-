@@ -524,40 +524,61 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if text == '🚀 Start Task':
         return await run_command(update, context)
+    
     elif text == '🔄 Resume Task':
         return await resume_task(update, context)
+    
     elif text == '⏸ Pause Task':
         return await pause_command(update, context)
+    
     elif text == '⏹ Stop Task':
         return await stop_command(update, context)
+    
     elif text == '📊 Statistics':
         return await stats_command(update, context)
+    
     elif text == '🗑 Clear History':
         return await clear_command(update, context)
+    
     elif text == '🌐 Dashboard':
         token = generate_dashboard_token(user_id)
         dashboard_url = f"{APP_URL}/dashboard/{token}"
         await update.message.reply_text(
-            f"✅ <b>Delays Updated!</b>\n\n"
-            f"⏱ Min Delay: {min_delay}s\n"
-            f"⏱ Max Delay: {max_delay}s\n\n"
-            f"New settings will apply to next task.",
+            f"🌐 <b>Your Dashboard:</b>\n\n"
+            f"<code>{dashboard_url}</code>\n\n"
+            f"Copy the link and open it in your browser to monitor your tasks in real-time!",
             parse_mode='HTML',
-            reply_markup=get_settings_keyboard()
+            reply_markup=get_main_keyboard()
         )
-        
-        await log_to_admin(context.bot, "⚙️ Settings Changed - Delays", user_id, {
-            'min_delay': min_delay,
-            'max_delay': max_delay
-        })
-        
         return SETTINGS_MENU
-    except ValueError:
+    
+    elif text == '⚙️ Settings':
+        return await settings_command(update, context)
+    
+    elif text == '🔄 Reset Session':
+        return await reset_session(update, context)
+    
+    elif text == '❓ Help':
+        return await help_command(update, context)
+    
+    elif text == '❌ Cancel':
+        return await cancel(update, context)
+    
+    elif text == '🔙 Back to Main':
         await update.message.reply_text(
-            "❌ Invalid number. Try again:",
-            reply_markup=get_cancel_keyboard()
+            "🏠 Back to main menu",
+            reply_markup=get_main_keyboard()
         )
-        return SET_MAX_DELAY
+        return ConversationHandler.END
+    
+    elif text == '⏱ Change Delays':
+        return await change_delays(update, context)
+    
+    elif text == '⏳ Change Pause Time':
+        return await change_pause_time(update, context)
+    
+    elif text == '📋 View Settings':
+        return await view_settings(update, context)
 
 async def change_pause_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
