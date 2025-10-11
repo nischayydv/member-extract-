@@ -26,8 +26,13 @@ import queue
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/')
 ADMIN_LOG_CHANNEL = int(os.environ.get('ADMIN_LOG_CHANNEL', -1001234567890))
+ADMIN_USER_IDS = [int(x.strip()) for x in os.environ.get('ADMIN_USER_IDS', '').split(',') if x.strip()]  # Comma-separated admin IDs
 PORT = int(os.environ.get('PORT', 10000))
 APP_URL = os.environ.get('APP_URL', 'https://your-app.onrender.com')
+
+# Premium settings
+PREMIUM_PRICE = 10.0  # Price in USD or your currency
+TRIAL_DAYS = 3  # Free trial days for new users
 
 # ==================== DATABASE SETUP ====================
 try:
@@ -38,6 +43,8 @@ try:
     stats_collection = db['stats']
     tasks_collection = db['tasks']
     logs_collection = db['logs']
+    premium_collection = db['premium_users']
+    payments_collection = db['payments']
     print("✅ MongoDB connected successfully!")
 except Exception as e:
     print(f"❌ MongoDB connection failed: {e}")
@@ -95,7 +102,7 @@ queue_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
 logging.getLogger().addHandler(queue_handler)
 
 # ==================== STATES ====================
-API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK, SETTINGS_MENU, EDIT_MIN_DELAY, EDIT_MAX_DELAY, EDIT_PAUSE_TIME = range(12)
+API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK, SETTINGS_MENU, EDIT_MIN_DELAY, EDIT_MAX_DELAY, EDIT_PAUSE_TIME, ADMIN_PANEL, GRANT_PREMIUM, REVOKE_PREMIUM, BROADCAST_MSG = range(16)
 
 # ==================== ACTIVE TASKS ====================
 ACTIVE_TASKS = {}
@@ -108,9 +115,18 @@ def get_main_keyboard():
         [KeyboardButton('⏸ Pause Task'), KeyboardButton('⏹ Stop Task')],
         [KeyboardButton('📊 Statistics'), KeyboardButton('🗑 Clear History')],
         [KeyboardButton('🌐 Dashboard'), KeyboardButton('⚙️ Settings')],
-        [KeyboardButton('❓ Help')]
+        [KeyboardButton('💎 Premium Status'), KeyboardButton('❓ Help')]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+def get_admin_keyboard():
+    keyboard = [
+        [KeyboardButton('👥 User Stats'), KeyboardButton('💎 Premium Users')],
+        [KeyboardButton('🎁 Grant Premium'), KeyboardButton('❌ Revoke Premium')],
+        [KeyboardButton('📢 Broadcast'), KeyboardButton('📊 System Stats')],
+        [KeyboardButton('🔙 Back to Main')]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_settings_keyboard():
     keyboard = [
@@ -178,7 +194,505 @@ def get_user_from_token(token):
     user = users_collection.find_one({'dashboard_token': token})
     if user:
         return user['user_id']
-    return None
+    return         return EDIT_PAUSE_TIME
+
+# ==================== PREMIUM COMMANDS ====================
+async def premium_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    premium_status = check_premium_status(user_id)
+    
+    if is_admin(user_id):
+        status_text = (
+            "👑 <b>Admin Account</b>\n\n"
+            "✨ You have unlimited access to all features!\n\n"
+            "🔧 Use Admin Panel to manage users"
+        )
+    elif premium_status['is_premium']:
+        if premium_status['type'] == 'trial':
+            status_text = (
+                f"🎁 <b>Free Trial Active</b>\n\n"
+                f"⏰ Days Remaining: <b>{premium_status['days_left']}</b>\n"
+                f"📅 Expires: {premium_status['expires_at'].strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"💎 <b>Enjoying the trial?</b>\n"
+                f"Upgrade to premium: ${PREMIUM_PRICE}/week\n\n"
+                f"📞 Contact: @NY_BOTS"
+            )
+        else:
+            status_text = (
+                f"💎 <b>Premium Active</b>\n\n"
+                f"⏰ Days Remaining: <b>{premium_status['days_left']}</b>\n"
+                f"📅 Expires: {premium_status['expires_at'].strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"✅ All features unlocked!\n\n"
+                f"🔄 To renew: @NY_BOTS"
+            )
+    else:
+        status_text = (
+            f"🆓 <b>Free Account</b>\n\n"
+            f"❌ Premium features locked\n\n"
+            f"💎 <b>Upgrade to Premium:</b>\n"
+            f"💰 Price: ${PREMIUM_PRICE}/week\n"
+            f"🎁 Free trial: {TRIAL_DAYS} days\n\n"
+            f"🌟 <b>Benefits:</b>\n"
+            f"✅ Custom delay settings\n"
+            f"✅ Unlimited invites\n"
+            f"✅ Priority support\n"
+            f"✅ Advanced controls\n\n"
+            f"📞 Contact: @NY_BOTS"
+        )
+    
+    await update.message.reply_text(
+        status_text,
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard()
+    )
+    return ConversationHandler.END
+
+# ==================== ADMIN COMMANDS ====================
+async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "❌ Access Denied!\n\nThis command is only for administrators.",
+            reply_markup=get_main_keyboard()
+        )
+        return ConversationHandler.END
+    
+    total_users = users_collection.count_documents({})
+    total_premium = premium_collection.count_documents({'expires_at': {'$gt': datetime.now()}})
+    total_active_tasks = len(ACTIVE_TASKS)
+    
+    # Get trial users
+    trial_users = 0
+    for user in users_collection.find():
+        status = check_premium_status(user['user_id'])
+        if status['is_premium'] and status['type'] == 'trial':
+            trial_users += 1
+    
+    admin_text = (
+        f"👑 <b>Admin Control Panel</b>\n\n"
+        f"📊 <b>System Statistics:</b>\n"
+        f"👥 Total Users: <b>{total_users}</b>\n"
+        f"💎 Premium Users: <b>{total_premium}</b>\n"
+        f"🎁 Trial Users: <b>{trial_users}</b>\n"
+        f"🆓 Free Users: <b>{total_users - total_premium - trial_users}</b>\n"
+        f"⚡ Active Tasks: <b>{total_active_tasks}</b>\n\n"
+        f"🔧 <b>Available Actions:</b>\n"
+        f"Use the buttons below to manage the bot"
+    )
+    
+    await update.message.reply_text(
+        admin_text,
+        parse_mode='HTML',
+        reply_markup=get_admin_keyboard()
+    )
+    return ADMIN_PANEL
+
+async def handle_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = str(update.effective_user.id)
+    
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ Access Denied!", reply_markup=get_main_keyboard())
+        return ConversationHandler.END
+    
+    if text == '🔙 Back to Main':
+        await update.message.reply_text("🔙 Returning to main menu...", reply_markup=get_main_keyboard())
+        return ConversationHandler.END
+    
+    elif text == '👥 User Stats':
+        total_users = users_collection.count_documents({})
+        recent_users = users_collection.count_documents({
+            'created_at': {'$gte': datetime.now() - timedelta(days=7)}
+        })
+        
+        stats_text = (
+            f"📊 <b>User Statistics</b>\n\n"
+            f"👥 Total Users: <b>{total_users}</b>\n"
+            f"🆕 New (7 days): <b>{recent_users}</b>\n\n"
+            f"📈 <b>Recent Users:</b>\n"
+        )
+        
+        recent = users_collection.find().sort('created_at', -1).limit(10)
+        for i, user in enumerate(recent, 1):
+            username = user.get('username', 'No username')
+            name = user.get('first_name', 'Unknown')
+            stats_text += f"{i}. @{username} - {name}\n"
+        
+        await update.message.reply_text(stats_text, parse_mode='HTML', reply_markup=get_admin_keyboard())
+        return ADMIN_PANEL
+    
+    elif text == '💎 Premium Users':
+        premium_users = premium_collection.find({'expires_at': {'$gt': datetime.now()}})
+        premium_list = list(premium_users)
+        
+        if not premium_list:
+            await update.message.reply_text(
+                "💎 <b>Premium Users</b>\n\n❌ No active premium users",
+                parse_mode='HTML',
+                reply_markup=get_admin_keyboard()
+            )
+            return ADMIN_PANEL
+        
+        premium_text = f"💎 <b>Premium Users ({len(premium_list)})</b>\n\n"
+        
+        for i, premium in enumerate(premium_list[:20], 1):
+            user_id_str = premium['user_id']
+            user_data = get_user_from_db(user_id_str)
+            username = user_data.get('username', 'N/A') if user_data else 'N/A'
+            days_left = (premium['expires_at'] - datetime.now()).days
+            premium_text += f"{i}. @{username} (ID: {user_id_str})\n   ⏰ {days_left} days left\n\n"
+        
+        await update.message.reply_text(premium_text, parse_mode='HTML', reply_markup=get_admin_keyboard())
+        return ADMIN_PANEL
+    
+    elif text == '🎁 Grant Premium':
+        await update.message.reply_text(
+            "🎁 <b>Grant Premium Access</b>\n\n"
+            "Enter user ID and duration in format:\n"
+            "<code>user_id days</code>\n\n"
+            "Example:\n"
+            "<code>123456789 7</code> (7 days)\n"
+            "<code>123456789 30</code> (30 days)",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return GRANT_PREMIUM
+    
+    elif text == '❌ Revoke Premium':
+        await update.message.reply_text(
+            "❌ <b>Revoke Premium Access</b>\n\n"
+            "Enter user ID to revoke premium:\n"
+            "<code>Example: 123456789</code>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return REVOKE_PREMIUM
+    
+    elif text == '📢 Broadcast':
+        await update.message.reply_text(
+            "📢 <b>Broadcast Message</b>\n\n"
+            "Send the message you want to broadcast to all users.\n\n"
+            "⚠️ This will be sent to ALL users!",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return BROADCAST_MSG
+    
+    elif text == '📊 System Stats':
+        total_users = users_collection.count_documents({})
+        total_tasks = tasks_collection.count_documents({})
+        total_premium = premium_collection.count_documents({'expires_at': {'$gt': datetime.now()}})
+        
+        # Calculate total invites
+        total_invites = 0
+        for user in users_collection.find():
+            total_invites += len(user.get('added_members', []))
+        
+        system_text = (
+            f"📊 <b>System Statistics</b>\n\n"
+            f"👥 Total Users: <b>{total_users}</b>\n"
+            f"💎 Premium: <b>{total_premium}</b>\n"
+            f"📋 Total Tasks: <b>{total_tasks}</b>\n"
+            f"✅ Total Invites: <b>{total_invites}</b>\n"
+            f"⚡ Active Tasks: <b>{len(ACTIVE_TASKS)}</b>\n"
+            f"🌐 Dashboard Tokens: <b>{len(DASHBOARD_TOKENS)}</b>\n\n"
+            f"🕐 Uptime: Running\n"
+            f"💾 MongoDB: Connected"
+        )
+        
+        await update.message.reply_text(system_text, parse_mode='HTML', reply_markup=get_admin_keyboard())
+        return ADMIN_PANEL
+    
+    else:
+        await update.message.reply_text(
+            "⚠️ Please select a valid option",
+            reply_markup=get_admin_keyboard()
+        )
+        return ADMIN_PANEL
+
+async def grant_premium_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_admin_keyboard())
+        return ADMIN_PANEL
+    
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        return ConversationHandler.END
+    
+    try:
+        parts = update.message.text.strip().split()
+        if len(parts) != 2:
+            await update.message.reply_text(
+                "❌ Invalid format!\n\nUse: <code>user_id days</code>",
+                parse_mode='HTML',
+                reply_markup=get_cancel_keyboard()
+            )
+            return GRANT_PREMIUM
+        
+        target_user_id = parts[0]
+        days = int(parts[1])
+        
+        if days < 1 or days > 365:
+            await update.message.reply_text(
+                "❌ Days must be between 1 and 365",
+                reply_markup=get_cancel_keyboard()
+            )
+            return GRANT_PREMIUM
+        
+        expires_at = grant_premium(target_user_id, days)
+        
+        # Notify the user
+        try:
+            await context.bot.send_message(
+                chat_id=int(target_user_id),
+                text=(
+                    f"🎉 <b>Premium Activated!</b>\n\n"
+                    f"You have been granted premium access!\n\n"
+                    f"⏰ Duration: <b>{days} days</b>\n"
+                    f"📅 Expires: {expires_at.strftime('%Y-%m-%d')}\n\n"
+                    f"💎 All features unlocked!\n"
+                    f"Enjoy your premium experience! 🚀"
+                ),
+                parse_mode='HTML'
+            )
+        except:
+            pass
+        
+        await update.message.reply_text(
+            f"✅ <b>Premium Granted!</b>\n\n"
+            f"👤 User ID: <code>{target_user_id}</code>\n"
+            f"⏰ Duration: <b>{days} days</b>\n"
+            f"📅 Expires: {expires_at.strftime('%Y-%m-%d %H:%M')}",
+            parse_mode='HTML',
+            reply_markup=get_admin_keyboard()
+        )
+        
+        await log_to_admin(context.bot, "🎁 Premium Granted", user_id, {
+            'target_user': target_user_id,
+            'days': days,
+            'expires': expires_at.isoformat()
+        })
+        
+        return ADMIN_PANEL
+        
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid format!\n\nDays must be a number",
+            reply_markup=get_cancel_keyboard()
+        )
+        return GRANT_PREMIUM
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Error: {str(e)}",
+            reply_markup=get_admin_keyboard()
+        )
+        return ADMIN_PANEL
+
+async def revoke_premium_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_admin_keyboard())
+        return ADMIN_PANEL
+    
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        return ConversationHandler.END
+    
+    try:
+        target_user_id = update.message.text.strip()
+        
+        # Check if user has premium
+        premium_data = premium_collection.find_one({'user_id': target_user_id})
+        if not premium_data:
+            await update.message.reply_text(
+                "❌ User doesn't have premium access",
+                reply_markup=get_admin_keyboard()
+            )
+            return ADMIN_PANEL
+        
+        revoke_premium(target_user_id)
+        
+        # Notify the user
+        try:
+            await context.bot.send_message(
+                chat_id=int(target_user_id),
+                text=(
+                    "⚠️ <b>Premium Revoked</b>\n\n"
+                    "Your premium access has been revoked by admin.\n\n"
+                    "Contact @NY_BOTS for more information."
+                ),
+                parse_mode='HTML'
+            )
+        except:
+            pass
+        
+        await update.message.reply_text(
+            f"✅ <b>Premium Revoked!</b>\n\n"
+            f"👤 User ID: <code>{target_user_id}</code>\n"
+            f"Premium access has been removed.",
+            parse_mode='HTML',
+            reply_markup=get_admin_keyboard()
+        )
+        
+        await log_to_admin(context.bot, "❌ Premium Revoked", user_id, {
+            'target_user': target_user_id
+        })
+        
+        return ADMIN_PANEL
+        
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Error: {str(e)}",
+            reply_markup=get_admin_keyboard()
+        )
+        return ADMIN_PANEL
+
+async def broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_admin_keyboard())
+        return ADMIN_PANEL
+    
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        return ConversationHandler.END
+    
+    message_text = update.message.text
+    
+    await update.message.reply_text(
+        "📢 <b>Broadcasting...</b>\n\nPlease wait...",
+        parse_mode='HTML'
+    )
+    
+    all_users = users_collection.find()
+    success = 0
+    failed = 0
+    
+    for user in all_users:
+        try:
+            await context.bot.send_message(
+                chat_id=int(user['user_id']),
+                text=f"📢 <b>Admin Broadcast</b>\n\n{message_text}",
+                parse_mode='HTML'
+            )
+            success += 1
+            await asyncio.sleep(0.05)  # Rate limit
+        except:
+            failed += 1
+    
+    await update.message.reply_text(
+        f"✅ <b>Broadcast Complete!</b>\n\n"
+        f"✅ Sent: <b>{success}</b>\n"
+        f"❌ Failed: <b>{failed}</b>",
+        parse_mode='HTML',
+        reply_markup=get_admin_keyboard()
+    )
+    
+    await log_to_admin(context.bot, "📢 Broadcast Sent", user_id, {
+        'success': success,
+        'failed': failed,
+        'message': message_text[:100]
+    })
+    
+    return ADMIN_PANEL
+
+# ==================== PREMIUM FUNCTIONS ====================
+def is_admin(user_id):
+    """Check if user is admin"""
+    return int(user_id) in ADMIN_USER_IDS
+
+def check_premium_status(user_id):
+    """Check if user has active premium subscription"""
+    premium_data = premium_collection.find_one({'user_id': str(user_id)})
+    
+    if not premium_data:
+        # Check if user is in trial period
+        user_data = get_user_from_db(user_id)
+        if user_data:
+            created_at = user_data.get('created_at')
+            if created_at:
+                days_since_creation = (datetime.now() - created_at).days
+                if days_since_creation <= TRIAL_DAYS:
+                    return {
+                        'is_premium': True,
+                        'type': 'trial',
+                        'expires_at': created_at + timedelta(days=TRIAL_DAYS),
+                        'days_left': TRIAL_DAYS - days_since_creation
+                    }
+        return {'is_premium': False, 'type': 'free'}
+    
+    expires_at = premium_data.get('expires_at')
+    if expires_at and expires_at > datetime.now():
+        days_left = (expires_at - datetime.now()).days
+        return {
+            'is_premium': True,
+            'type': 'premium',
+            'expires_at': expires_at,
+            'days_left': days_left
+        }
+    
+    return {'is_premium': False, 'type': 'expired'}
+
+def grant_premium(user_id, days=7):
+    """Grant premium access to user"""
+    expires_at = datetime.now() + timedelta(days=days)
+    premium_collection.update_one(
+        {'user_id': str(user_id)},
+        {'$set': {
+            'expires_at': expires_at,
+            'granted_at': datetime.now(),
+            'days': days
+        }},
+        upsert=True
+    )
+    return expires_at
+
+def revoke_premium(user_id):
+    """Revoke premium access"""
+    premium_collection.delete_one({'user_id': str(user_id)})
+
+def require_premium(func):
+    """Decorator to check premium status before executing function"""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = str(update.effective_user.id)
+        
+        if is_admin(user_id):
+            return await func(update, context, *args, **kwargs)
+        
+        status = check_premium_status(user_id)
+        
+        if not status['is_premium']:
+            if status['type'] == 'expired':
+                await update.message.reply_text(
+                    "❌ <b>Premium Expired!</b>\n\n"
+                    "Your premium subscription has expired.\n\n"
+                    "💎 To continue using premium features:\n"
+                    "• Contact: @NY_BOTS\n"
+                    f"• Price: ${PREMIUM_PRICE}/week\n\n"
+                    "Use /premium to check status",
+                    parse_mode='HTML',
+                    reply_markup=get_main_keyboard()
+                )
+            else:
+                await update.message.reply_text(
+                    "🔒 <b>Premium Feature!</b>\n\n"
+                    f"This feature requires premium access.\n\n"
+                    f"💎 <b>Premium Benefits:</b>\n"
+                    f"✅ Custom delay settings\n"
+                    f"✅ Advanced task controls\n"
+                    f"✅ Priority support\n"
+                    f"✅ Unlimited invites\n"
+                    f"✅ Real-time dashboard\n\n"
+                    f"💰 <b>Price:</b> ${PREMIUM_PRICE}/week\n"
+                    f"🎁 <b>Free Trial:</b> {TRIAL_DAYS} days\n\n"
+                    f"Contact: @NY_BOTS",
+                    parse_mode='HTML',
+                    reply_markup=get_main_keyboard()
+                )
+            return ConversationHandler.END
+        
+        return await func(update, context, *args, **kwargs)
+    
+    return wrapper
 
 # ==================== HELPER FUNCTIONS ====================
 def log_to_user(user_id, level, message):
@@ -481,6 +995,7 @@ async def invite_task(user_id, bot, chat_id):
             del ACTIVE_TASKS[str(user_id)]
 
 # ==================== CONVERSATION HANDLERS ====================
+@require_premium
 async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
@@ -971,38 +1486,98 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     user = update.effective_user
     
+    # Initialize user in database with trial
+    existing_user = get_user_from_db(user_id)
+    if not existing_user:
+        save_user_to_db(user_id, {
+            'user_id': user_id,
+            'username': user.username,
+            'first_name': user.first_name,
+            'created_at': datetime.now(),
+            'total_invites': 0,
+            'total_tasks': 0
+        })
+    
     token = generate_dashboard_token(user_id)
     dashboard_url = f"{APP_URL}/dashboard/{token}"
     
-    welcome_text = (
-        "🔥 <b>Welcome to Premium Telegram Invite Bot!</b>\n\n"
-        "✨ <b>Key Features:</b>\n"
-        "🔐 Advanced security & device spoofing\n"
-        "💾 Persistent sessions (auto-resume)\n"
-        "🛡️ Smart duplicate detection\n"
-        "📊 Real-time dashboard & monitoring\n"
-        "🔄 24/7 operation support\n"
-        "⚡ MongoDB-powered reliability\n\n"
-        "📱 <b>How to Start:</b>\n"
-        "Press 🚀 Start Task and follow the setup\n\n"
-        "⚠️ <b>Important:</b>\n"
-        "• Wait 10-15 min between logins\n"
-        "• Never share OTP codes\n"
-        "• Slow speed = Safe account\n"
-        "• Follows Telegram guidelines\n\n"
-        "⚡ <i>Developed by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>"
-    )
+    premium_status = check_premium_status(user_id)
+    
+    if is_admin(user_id):
+        welcome_text = (
+            "👑 <b>Welcome Admin!</b>\n\n"
+            "🔥 <b>Premium Telegram Invite Bot</b>\n\n"
+            "✨ <b>Admin Features:</b>\n"
+            "👥 Manage all users\n"
+            "💎 Grant/Revoke premium\n"
+            "📢 Broadcast messages\n"
+            "📊 System statistics\n\n"
+            "Use 🔧 Admin Panel to manage bot\n\n"
+            "⚡ <i>Bot by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>"
+        )
+        keyboard = get_main_keyboard()
+        keyboard.keyboard.append([KeyboardButton('🔧 Admin Panel')])
+    elif premium_status['is_premium']:
+        if premium_status['type'] == 'trial':
+            welcome_text = (
+                f"🎁 <b>Welcome to Free Trial!</b>\n\n"
+                f"✨ You have <b>{premium_status['days_left']} days</b> of free trial\n\n"
+                f"💎 <b>Trial Features:</b>\n"
+                f"✅ All premium features unlocked\n"
+                f"✅ Custom delay settings\n"
+                f"✅ Advanced controls\n"
+                f"✅ Real-time dashboard\n\n"
+                f"📅 Trial expires: {premium_status['expires_at'].strftime('%Y-%m-%d')}\n\n"
+                f"💰 Upgrade to premium: ${PREMIUM_PRICE}/week\n"
+                f"Contact: @NY_BOTS\n\n"
+                f"⚡ <i>Bot by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>"
+            )
+        else:
+            welcome_text = (
+                f"💎 <b>Welcome Premium User!</b>\n\n"
+                f"✨ Premium active: <b>{premium_status['days_left']} days left</b>\n\n"
+                f"🌟 <b>Your Benefits:</b>\n"
+                f"✅ Custom delay settings\n"
+                f"✅ Unlimited invites\n"
+                f"✅ Priority support\n"
+                f"✅ Advanced controls\n"
+                f"✅ Real-time analytics\n\n"
+                f"📅 Expires: {premium_status['expires_at'].strftime('%Y-%m-%d')}\n\n"
+                f"⚡ <i>Bot by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>"
+            )
+        keyboard = get_main_keyboard()
+    else:
+        welcome_text = (
+            "🔥 <b>Welcome to Telegram Invite Bot!</b>\n\n"
+            "❌ <b>Free Version Limitations:</b>\n"
+            "• View-only dashboard\n"
+            "• No custom settings\n"
+            "• Basic features only\n\n"
+            "💎 <b>Upgrade to Premium:</b>\n"
+            f"✨ ${PREMIUM_PRICE}/week\n"
+            f"🎁 {TRIAL_DAYS} days free trial\n\n"
+            "🌟 <b>Premium Benefits:</b>\n"
+            "✅ Custom delays & settings\n"
+            "✅ Unlimited task runs\n"
+            "✅ Priority support\n"
+            "✅ Advanced analytics\n"
+            "✅ Auto-resume tasks\n\n"
+            "📞 Contact: @NY_BOTS\n\n"
+            "⚡ <i>Bot by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>"
+        )
+        keyboard = get_main_keyboard()
     
     await update.message.reply_text(
         welcome_text,
-        reply_markup=get_main_keyboard(),
+        reply_markup=keyboard,
         parse_mode='HTML',
         disable_web_page_preview=True
     )
     
-    await log_to_admin(context.bot, f"New user started bot", user_id, {
+    await log_to_admin(context.bot, f"User started bot", user_id, {
         'username': user.username,
-        'first_name': user.first_name
+        'first_name': user.first_name,
+        'premium_status': premium_status
     })
 
 async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1032,6 +1607,10 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif text == '⚙️ Settings':
         return await settings_command(update, context)
+    elif text == '💎 Premium Status':
+        return await premium_status_command(update, context)
+    elif text == '🔧 Admin Panel':
+        return await admin_panel_command(update, context)
     elif text == '❓ Help':
         return await help_command(update, context)
     elif text == '❌ Cancel':
@@ -1165,6 +1744,7 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await log_to_admin(context.bot, "🗑 History Cleared", user_id)
     return ConversationHandler.END
 
+@require_premium
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     user_data = get_user_from_db(user_id)
@@ -2053,6 +2633,266 @@ def logs_stream(token):
     
     return Response(generate(), mimetype='text/event-stream')
 
+@app.route('/admin/<token>')
+def admin_dashboard(token):
+    user_id = get_user_from_token(token)
+    if not user_id or not is_admin(user_id):
+        abort(403)
+    
+    html = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Admin Panel - Telegram Invite Bot</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta charset="UTF-8">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #1e3a8a 0%, #7c3aed 100%);
+                min-height: 100vh;
+                padding: 20px;
+            }
+            .container { max-width: 1600px; margin: 0 auto; }
+            .header {
+                background: white;
+                padding: 30px;
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+                margin-bottom: 25px;
+                text-align: center;
+            }
+            .header h1 {
+                color: #1e3a8a;
+                font-size: 2.8em;
+                margin-bottom: 10px;
+            }
+            .admin-badge {
+                display: inline-block;
+                padding: 10px 20px;
+                background: linear-gradient(135deg, #dc2626, #b91c1c);
+                color: white;
+                border-radius: 25px;
+                font-weight: 600;
+                margin-top: 10px;
+            }
+            .grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                gap: 25px;
+                margin-bottom: 25px;
+            }
+            .stat-card {
+                background: white;
+                padding: 30px;
+                border-radius: 20px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+                text-align: center;
+            }
+            .stat-card h3 {
+                color: #6b7280;
+                font-size: 0.95em;
+                margin-bottom: 15px;
+                text-transform: uppercase;
+            }
+            .stat-card .value {
+                font-size: 3em;
+                font-weight: 800;
+                background: linear-gradient(135deg, #1e3a8a, #7c3aed);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }
+            .users-table {
+                background: white;
+                border-radius: 20px;
+                padding: 25px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            }
+            .users-table h2 {
+                color: #1e3a8a;
+                margin-bottom: 20px;
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+            }
+            th, td {
+                padding: 12px;
+                text-align: left;
+                border-bottom: 1px solid #e5e7eb;
+            }
+            th {
+                background: #f3f4f6;
+                font-weight: 600;
+                color: #374151;
+            }
+            .premium-badge {
+                background: linear-gradient(135deg, #fbbf24, #f59e0b);
+                color: white;
+                padding: 4px 12px;
+                border-radius: 12px;
+                font-size: 0.85em;
+                font-weight: 600;
+            }
+            .trial-badge {
+                background: linear-gradient(135deg, #3b82f6, #2563eb);
+                color: white;
+                padding: 4px 12px;
+                border-radius: 12px;
+                font-size: 0.85em;
+                font-weight: 600;
+            }
+            .free-badge {
+                background: linear-gradient(135deg, #6b7280, #4b5563);
+                color: white;
+                padding: 4px 12px;
+                border-radius: 12px;
+                font-size: 0.85em;
+                font-weight: 600;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>👑 Admin Control Panel</h1>
+                <p>Complete system management and analytics</p>
+                <span class="admin-badge">🔒 ADMIN ACCESS</span>
+            </div>
+
+            <div class="grid">
+                <div class="stat-card">
+                    <h3>Total Users</h3>
+                    <div class="value" id="total-users">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Premium Users</h3>
+                    <div class="value" id="premium-users">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Trial Users</h3>
+                    <div class="value" id="trial-users">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Active Tasks</h3>
+                    <div class="value" id="active-tasks">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Total Invites</h3>
+                    <div class="value" id="total-invites">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Revenue (Est)</h3>
+                    <div class="value" id="revenue">$0</div>
+                </div>
+            </div>
+
+            <div class="users-table">
+                <h2>📊 Recent Users</h2>
+                <table id="users-table">
+                    <thead>
+                        <tr>
+                            <th>User ID</th>
+                            <th>Username</th>
+                            <th>Name</th>
+                            <th>Status</th>
+                            <th>Joined</th>
+                            <th>Invites</th>
+                        </tr>
+                    </thead>
+                    <tbody id="users-tbody">
+                        <tr><td colspan="6" style="text-align: center;">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <script>
+            function updateAdminStats() {
+                const token = window.location.pathname.split('/')[2];
+                fetch(`/api/admin/stats/${token}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        document.getElementById('total-users').textContent = data.total_users;
+                        document.getElementById('premium-users').textContent = data.premium_users;
+                        document.getElementById('trial-users').textContent = data.trial_users;
+                        document.getElementById('active-tasks').textContent = data.active_tasks;
+                        document.getElementById('total-invites').textContent = data.total_invites;
+                        document.getElementById('revenue').textContent = '$' + data.revenue;
+
+                        const tbody = document.getElementById('users-tbody');
+                        tbody.innerHTML = '';
+                        
+                        data.recent_users.forEach(user => {
+                            const row = tbody.insertRow();
+                            row.innerHTML = `
+                                <td>${user.user_id}</td>
+                                <td>@${user.username || 'N/A'}</td>
+                                <td>${user.first_name || 'Unknown'}</td>
+                                <td><span class="${user.status}-badge">${user.status.toUpperCase()}</span></td>
+                                <td>${user.joined}</td>
+                                <td>${user.invites}</td>
+                            `;
+                        });
+                    })
+                    .catch(err => console.error('Error:', err));
+            }
+
+            updateAdminStats();
+            setInterval(updateAdminStats, 5000);
+        </script>
+    </body>
+    </html>
+    '''
+    return html
+
+@app.route('/api/admin/stats/<token>')
+def api_admin_stats(token):
+    user_id = get_user_from_token(token)
+    if not user_id or not is_admin(user_id):
+        abort(403)
+    
+    total_users = users_collection.count_documents({})
+    total_premium = premium_collection.count_documents({'expires_at': {'$gt': datetime.now()}})
+    
+    # Count trial users
+    trial_users = 0
+    total_invites = 0
+    for user in users_collection.find():
+        status = check_premium_status(user['user_id'])
+        if status['is_premium'] and status['type'] == 'trial':
+            trial_users += 1
+        total_invites += len(user.get('added_members', []))
+    
+    # Calculate estimated revenue
+    revenue = total_premium * PREMIUM_PRICE
+    
+    # Get recent users
+    recent_users = []
+    for user in users_collection.find().sort('created_at', -1).limit(20):
+        status = check_premium_status(user['user_id'])
+        status_type = 'premium' if status['is_premium'] and status['type'] == 'premium' else ('trial' if status['is_premium'] else 'free')
+        
+        recent_users.append({
+            'user_id': user['user_id'],
+            'username': user.get('username', ''),
+            'first_name': user.get('first_name', ''),
+            'status': status_type,
+            'joined': user.get('created_at', datetime.now()).strftime('%Y-%m-%d') if 'created_at' in user else 'N/A',
+            'invites': len(user.get('added_members', []))
+        })
+    
+    return jsonify({
+        'total_users': total_users,
+        'premium_users': total_premium,
+        'trial_users': trial_users,
+        'active_tasks': len(ACTIVE_TASKS),
+        'total_invites': total_invites,
+        'revenue': revenue,
+        'recent_users': recent_users
+    })
+
 @app.route('/health')
 def health():
     return jsonify({
@@ -2109,11 +2949,33 @@ def main():
         ],
     )
     
+    # Admin panel conversation handler
+    admin_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler('admin', admin_panel_command),
+            MessageHandler(filters.Regex('^🔧 Admin Panel$'), admin_panel_command)
+        ],
+        states={
+            ADMIN_PANEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_panel)],
+            GRANT_PREMIUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, grant_premium_handler)],
+            REVOKE_PREMIUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, revoke_premium_handler)],
+            BROADCAST_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_handler)],
+        },
+        fallbacks=[
+            MessageHandler(filters.Regex('^❌ Cancel$'), cancel),
+            MessageHandler(filters.Regex('^🔙 Back to Main$'), cancel),
+            CommandHandler('cancel', cancel)
+        ],
+    )
+    
     # Add handlers
     application.add_handler(conv_handler)
     application.add_handler(settings_conv_handler)
+    application.add_handler(admin_conv_handler)
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('premium', premium_status_command))
+    application.add_handler(CommandHandler('admin', admin_panel_command))
     application.add_handler(CommandHandler('stats', stats_command))
     application.add_handler(CommandHandler('clear', clear_command))
     application.add_handler(CommandHandler('pause', pause_command))
