@@ -592,7 +592,24 @@ async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'filter_online': False,
             'filter_verified': False,
             'skip_dm_on_fail': False,
-            'custom_message': # ==================== FLASK ROUTES ====================
+            'custom_message': 
+# ==================== FLASK ROUTES ====================
+from flask import Flask
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Uploader Bot</title>
+    </head>
+    <body>
+        <h1>Welcome!</h1>
+    </body>
+    </html>
+    '''            
 @app.route('/')
 def index():
     return '''
