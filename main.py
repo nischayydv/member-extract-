@@ -283,6 +283,7 @@ async def try_invite(client, target_entity, user):
 
 async def invite_task(user_id, bot, chat_id):
     try:
+        # Always fetch fresh user data from database to get latest settings
         user_data = get_user_from_db(user_id)
         if not user_data:
             await bot.send_message(chat_id, "❌ No configuration found. Use 🚀 Start Task first.")
@@ -294,10 +295,14 @@ async def invite_task(user_id, bot, chat_id):
         target_group = user_data['target_group']
         invite_link = user_data['invite_link']
         
+        # Get settings from database - this ensures latest settings are used
         settings = user_data.get('settings', {})
-        min_delay = settings.get('min_delay', 4.0)
-        max_delay = settings.get('max_delay', 10.0)
-        pause_time = settings.get('pause_time', 600)
+        min_delay = float(settings.get('min_delay', 4.0))
+        max_delay = float(settings.get('max_delay', 10.0))
+        pause_time = int(settings.get('pause_time', 600))
+        
+        # Log the settings being used
+        log_to_user(user_id, 'INFO', f"⚙️ Using settings: Delay {min_delay}-{max_delay}s, Pause {pause_time//60}min")
 
         ACTIVE_TASKS[str(user_id)] = {
             'running': True,
@@ -339,8 +344,10 @@ async def invite_task(user_id, bot, chat_id):
             f"👤 Account: {me.first_name}\n"
             f"📱 Device: {device_info['device_model']}\n"
             f"⏱ Delay: {min_delay}-{max_delay}s\n"
+            f"⏸ Pause: {pause_time//60}min on flood\n"
             f"📍 Source: {source_group}\n"
             f"🎯 Target: {target_group}\n\n"
+            f"💡 Settings are loaded from database!\n"
             f"Use keyboard buttons to control!",
             parse_mode='HTML'
         )
@@ -1170,18 +1177,25 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     
     settings = user_data.get('settings', {})
-    min_delay = settings.get('min_delay', 4.0)
-    max_delay = settings.get('max_delay', 10.0)
-    pause_time = settings.get('pause_time', 600)
+    min_delay = float(settings.get('min_delay', 4.0))
+    max_delay = float(settings.get('max_delay', 10.0))
+    pause_time = int(settings.get('pause_time', 600))
+    
+    is_running = user_id in ACTIVE_TASKS
     
     settings_text = (
         "⚙️ <b>Current Settings</b>\n\n"
         f"⏱ <b>Delay Range:</b> {min_delay}-{max_delay} seconds\n"
         f"⏸ <b>Pause Duration:</b> {pause_time//60} minutes\n"
         f"📱 <b>Device:</b> {user_data.get('device_info', {}).get('device_model', 'N/A')}\n"
-        f"📞 <b>Phone:</b> {user_data.get('phone', 'N/A')}\n\n"
-        "Select an option below:"
+        f"📞 <b>Phone:</b> {user_data.get('phone', 'N/A')}\n"
+        f"🔴 <b>Task Status:</b> {'🟢 Running' if is_running else '⚫ Idle'}\n\n"
     )
+    
+    if is_running:
+        settings_text += "⚠️ <b>Note:</b> Settings changes will apply on next batch!\n\n"
+    
+    settings_text += "Select an option below:"
     
     await update.message.reply_text(
         settings_text,
@@ -1204,15 +1218,18 @@ async def handle_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     elif text == '⏱ Delay Settings':
         user_data = get_user_from_db(user_id)
         settings = user_data.get('settings', {}) if user_data else {}
-        min_delay = settings.get('min_delay', 4.0)
-        max_delay = settings.get('max_delay', 10.0)
+        min_delay = float(settings.get('min_delay', 4.0))
+        max_delay = float(settings.get('max_delay', 10.0))
+        
+        is_running = user_id in ACTIVE_TASKS
         
         await update.message.reply_text(
             f"⏱ <b>Delay Settings</b>\n\n"
             f"Current: <b>{min_delay}-{max_delay}s</b>\n\n"
             f"Enter new minimum delay (in seconds):\n"
             f"<code>Recommended: 4-8 seconds</code>\n\n"
-            f"⚠️ Lower delays = higher ban risk!",
+            f"⚠️ Lower delays = higher ban risk!\n"
+            f"{'💡 Changes will apply on next batch!' if is_running else ''}",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
@@ -1221,14 +1238,17 @@ async def handle_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     elif text == '⏸ Pause Duration':
         user_data = get_user_from_db(user_id)
         settings = user_data.get('settings', {}) if user_data else {}
-        pause_time = settings.get('pause_time', 600)
+        pause_time = int(settings.get('pause_time', 600))
+        
+        is_running = user_id in ACTIVE_TASKS
         
         await update.message.reply_text(
             f"⏸ <b>Pause Duration (FloodWait)</b>\n\n"
             f"Current: <b>{pause_time//60} minutes</b>\n\n"
             f"Enter new pause duration (in minutes):\n"
             f"<code>Recommended: 10-20 minutes</code>\n\n"
-            f"This pause activates when FloodWait occurs.",
+            f"This pause activates when FloodWait occurs.\n"
+            f"{'💡 Changes will apply on next batch!' if is_running else ''}",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
@@ -1352,21 +1372,29 @@ async def edit_max_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {'user_id': user_id},
             {'$set': {
                 'settings.min_delay': min_delay,
-                'settings.max_delay': max_delay
+                'settings.max_delay': max_delay,
+                'updated_at': datetime.now()
             }}
         )
+        
+        is_running = user_id in ACTIVE_TASKS
         
         await update.message.reply_text(
             f"✅ <b>Delay Settings Updated!</b>\n\n"
             f"⏱ New Range: <b>{min_delay}-{max_delay} seconds</b>\n\n"
-            f"Settings will apply to next task.",
+            f"{'💡 Changes will apply on next batch cycle!' if is_running else '✅ Settings will be used in next task.'}\n"
+            f"{'🔄 Current task is still running with updated settings.' if is_running else ''}",
             parse_mode='HTML',
             reply_markup=get_settings_keyboard()
         )
         
+        if is_running:
+            log_to_user(user_id, 'INFO', f"⚙️ Settings updated: Delay changed to {min_delay}-{max_delay}s")
+        
         await log_to_admin(context.bot, "⚙️ Delay Settings Changed", user_id, {
             'min_delay': min_delay,
-            'max_delay': max_delay
+            'max_delay': max_delay,
+            'task_running': is_running
         })
         
         return SETTINGS_MENU
@@ -1406,19 +1434,30 @@ async def edit_pause_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         users_collection.update_one(
             {'user_id': user_id},
-            {'$set': {'settings.pause_time': pause_seconds}}
+            {'$set': {
+                'settings.pause_time': pause_seconds,
+                'updated_at': datetime.now()
+            }}
         )
+        
+        is_running = user_id in ACTIVE_TASKS
         
         await update.message.reply_text(
             f"✅ <b>Pause Duration Updated!</b>\n\n"
             f"⏸ New Duration: <b>{pause_minutes} minutes</b>\n\n"
-            f"This will activate when FloodWait occurs.",
+            f"This will activate when FloodWait occurs.\n\n"
+            f"{'💡 Changes will apply on next batch cycle!' if is_running else '✅ Settings will be used in next task.'}\n"
+            f"{'🔄 Current task is still running with updated settings.' if is_running else ''}",
             parse_mode='HTML',
             reply_markup=get_settings_keyboard()
         )
         
+        if is_running:
+            log_to_user(user_id, 'INFO', f"⚙️ Settings updated: Pause time changed to {pause_minutes}min")
+        
         await log_to_admin(context.bot, "⚙️ Pause Duration Changed", user_id, {
-            'pause_time': f'{pause_minutes} minutes'
+            'pause_time': f'{pause_minutes} minutes',
+            'task_running': is_running
         })
         
         return SETTINGS_MENU
