@@ -592,24 +592,7 @@ async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'filter_online': False,
             'filter_verified': False,
             'skip_dm_on_fail': False,
-            'custom_message': 
-# ==================== FLASK ROUTES ====================
-from flask import Flask
-app = Flask(__name__)
-
-@app.route('/')
-def index():
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Uploader Bot</title>
-    </head>
-    <body>
-        <h1>Welcome!</h1>
-    </body>
-    </html>
-    '''            
+            'custom_message': # ==================== FLASK ROUTES ====================
 @app.route('/')
 def index():
     return '''
@@ -1178,6 +1161,28 @@ def logs_stream(token):
         abort(403)
     
     def generate():
+        if user_id not in USER_LOG_QUEUES:
+            USER_LOG_QUEUES[user_id] = Queue(maxsize=500)
+        
+        while True:
+            try:
+                log = USER_LOG_QUEUES[user_id].get(timeout=30)
+                yield f"data: {json.dumps(log)}\n\n"
+            except queue.Empty:
+                yield f"data: {json.dumps({'time': datetime.now().strftime('%H:%M:%S'), 'level': 'INFO', 'message': 'Waiting for activity...'})}\n\n"
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                break
+    
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'healthy',
+        'active_tasks': len(ACTIVE_TASKS),
+        'timestamp': datetime.now().isoformat()
+    })():
         if user_id not in USER_LOG_QUEUES:
             USER_LOG_QUEUES[user_id] = Queue(maxsize=500)
         
