@@ -95,7 +95,8 @@ queue_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
 logging.getLogger().addHandler(queue_handler)
 
 # ==================== STATES ====================
-API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK, SETTINGS_MENU, SET_MIN_DELAY, SET_MAX_DELAY, SET_PAUSE_TIME = range(12)
+API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK = range(8)
+SETTINGS_MENU, SETTINGS_MIN_DELAY, SETTINGS_MAX_DELAY, SETTINGS_PAUSE_TIME = range(8, 12)
 
 # ==================== ACTIVE TASKS ====================
 ACTIVE_TASKS = {}
@@ -118,8 +119,8 @@ def get_cancel_keyboard():
 
 def get_settings_keyboard():
     keyboard = [
-        [KeyboardButton('⏱ Change Delays'), KeyboardButton('⏳ Change Pause Time')],
-        [KeyboardButton('📋 View Settings'), KeyboardButton('🔙 Back to Main')]
+        [KeyboardButton('⏱ Change Delays'), KeyboardButton('⏸ Pause Duration')],
+        [KeyboardButton('📊 View Settings'), KeyboardButton('🔙 Back to Main')]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -357,11 +358,15 @@ async def invite_task(user_id, bot, chat_id):
         batch_count = 0
         while ACTIVE_TASKS.get(str(user_id), {}).get('running', False):
             try:
-                # Check pause state
+                # Check if paused
                 while ACTIVE_TASKS.get(str(user_id), {}).get('paused', False):
                     await asyncio.sleep(2)
                     if not ACTIVE_TASKS.get(str(user_id), {}).get('running', False):
                         break
+
+                # Check if still running after pause
+                if not ACTIVE_TASKS.get(str(user_id), {}).get('running', False):
+                    break
 
                 target_entity = await client.get_entity(target_group)
                 participants = await client.get_participants(source_group)
@@ -380,6 +385,9 @@ async def invite_task(user_id, bot, chat_id):
                         await asyncio.sleep(2)
                         if not ACTIVE_TASKS.get(str(user_id), {}).get('running', False):
                             break
+
+                    if not ACTIVE_TASKS.get(str(user_id), {}).get('running', False):
+                        break
 
                     uid = str(getattr(user, 'id', ''))
                     if not uid or getattr(user, 'bot', False) or getattr(user, 'is_self', False):
@@ -486,6 +494,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     token = generate_dashboard_token(user_id)
+    dashboard_url = f"{APP_URL}/dashboard/{token}"
     
     welcome_text = (
         "🔥 <b>Welcome to Premium Telegram Invite Bot!</b>\n\n"
@@ -524,180 +533,42 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if text == '🚀 Start Task':
         return await run_command(update, context)
-    
     elif text == '🔄 Resume Task':
         return await resume_task(update, context)
-    
     elif text == '⏸ Pause Task':
         return await pause_command(update, context)
-    
     elif text == '⏹ Stop Task':
         return await stop_command(update, context)
-    
     elif text == '📊 Statistics':
         return await stats_command(update, context)
-    
     elif text == '🗑 Clear History':
         return await clear_command(update, context)
-    
     elif text == '🌐 Dashboard':
         token = generate_dashboard_token(user_id)
         dashboard_url = f"{APP_URL}/dashboard/{token}"
         await update.message.reply_text(
-            f"🌐 <b>Your Dashboard:</b>\n\n"
-            f"<code>{dashboard_url}</code>\n\n"
-            f"Copy the link and open it in your browser to monitor your tasks in real-time!",
+            f"🌐 <b>Your Dashboard:</b>\n\n<code>{dashboard_url}</code>\n\n"
+            f"Copy the link and open in browser to monitor your tasks in real-time!",
             parse_mode='HTML',
             reply_markup=get_main_keyboard()
         )
-        return SETTINGS_MENU
-    
     elif text == '⚙️ Settings':
-        return await settings_command(update, context)
-    
+        return await settings_menu(update, context)
     elif text == '🔄 Reset Session':
         return await reset_session(update, context)
-    
     elif text == '❓ Help':
         return await help_command(update, context)
-    
     elif text == '❌ Cancel':
         return await cancel(update, context)
-    
     elif text == '🔙 Back to Main':
-        await update.message.reply_text(
-            "🏠 Back to main menu",
-            reply_markup=get_main_keyboard()
-        )
+        await update.message.reply_text("🏠 Back to main menu", reply_markup=get_main_keyboard())
         return ConversationHandler.END
-    
     elif text == '⏱ Change Delays':
         return await change_delays(update, context)
-    
-    elif text == '⏳ Change Pause Time':
-        return await change_pause_time(update, context)
-    
-    elif text == '📋 View Settings':
+    elif text == '⏸ Pause Duration':
+        return await change_pause_duration(update, context)
+    elif text == '📊 View Settings':
         return await view_settings(update, context)
-
-async def change_pause_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "⏳ <b>Change Pause Time</b>\n\n"
-        "Enter pause time in minutes (e.g., 10 for 10 minutes):\n\n"
-        "This is used when PeerFlood is detected.",
-        parse_mode='HTML',
-        reply_markup=get_cancel_keyboard()
-    )
-    return SET_PAUSE_TIME
-
-async def set_pause_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text == '❌ Cancel':
-        await update.message.reply_text("❌ Cancelled", reply_markup=get_settings_keyboard())
-        return SETTINGS_MENU
-    
-    try:
-        pause_minutes = int(update.message.text.strip())
-        if pause_minutes < 1 or pause_minutes > 120:
-            await update.message.reply_text(
-                "❌ Invalid value. Must be between 1-120 minutes.\n\nTry again:",
-                reply_markup=get_cancel_keyboard()
-            )
-            return SET_PAUSE_TIME
-        
-        pause_time = pause_minutes * 60
-        user_id = str(update.effective_user.id)
-        user_data = get_user_from_db(user_id)
-        
-        if user_data:
-            settings = user_data.get('settings', {})
-            settings['pause_time'] = pause_time
-            save_user_to_db(user_id, {'settings': settings})
-        
-        await update.message.reply_text(
-            f"✅ <b>Pause Time Updated!</b>\n\n"
-            f"⏳ Pause Time: {pause_minutes} minutes ({pause_time}s)\n\n"
-            f"This will be used when PeerFlood is detected.",
-            parse_mode='HTML',
-            reply_markup=get_settings_keyboard()
-        )
-        
-        await log_to_admin(context.bot, "⚙️ Settings Changed - Pause Time", user_id, {
-            'pause_time_minutes': pause_minutes,
-            'pause_time_seconds': pause_time
-        })
-        
-        return SETTINGS_MENU
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Invalid number. Try again:",
-            reply_markup=get_cancel_keyboard()
-        )
-        return SET_PAUSE_TIME
-
-async def reset_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    
-    # Check if task is running
-    if user_id in ACTIVE_TASKS:
-        await update.message.reply_text(
-            "⚠️ <b>Cannot Reset Session</b>\n\n"
-            "Please stop the active task first using ⏹ Stop Task button.",
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard()
-        )
-        return
-    
-    # Delete session file
-    session_file = f'session_{user_id}.session'
-    session_journal = f'session_{user_id}.session-journal'
-    
-    deleted = False
-    if os.path.exists(session_file):
-        try:
-            os.remove(session_file)
-            deleted = True
-        except Exception as e:
-            logger.error(f"Error deleting session file: {e}")
-    
-    if os.path.exists(session_journal):
-        try:
-            os.remove(session_journal)
-        except Exception as e:
-            logger.error(f"Error deleting session journal: {e}")
-    
-    # Clear user data from database
-    users_collection.update_one(
-        {'user_id': user_id},
-        {'$unset': {
-            'api_id': '',
-            'api_hash': '',
-            'phone': '',
-            'device_info': ''
-        }}
-    )
-    
-    if deleted:
-        await update.message.reply_text(
-            "✅ <b>Session Reset Complete!</b>\n\n"
-            "🗑 Session file deleted\n"
-            "🔄 Credentials cleared\n\n"
-            "Use 🚀 Start Task to login with a fresh session.",
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard()
-        )
-        
-        await log_to_admin(context.bot, "🔄 Session Reset", user_id, {
-            'session_file': session_file,
-            'status': 'deleted'
-        })
-    else:
-        await update.message.reply_text(
-            "ℹ️ <b>No Session Found</b>\n\n"
-            "No active session to reset.\n\n"
-            "Use 🚀 Start Task to create a new session.",
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard()
-        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
@@ -715,11 +586,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "▶️ Resume Task - Continue from where you left\n"
         "⏹ Stop Task - Stop task completely\n"
         "🗑 Clear History - Remove all added members\n"
-        "🔄 Reset Session - Delete session & start fresh\n\n"
+        "🔄 Reset Session - Delete saved session and start fresh\n\n"
         "⚙️ <b>Settings:</b>\n"
-        "• Change minimum/maximum delays\n"
-        "• Adjust pause time for flood protection\n"
-        "• View current settings\n\n"
+        "• Customize delays (4-10s default)\n"
+        "• Change pause duration on flood\n"
+        "• View current configuration\n\n"
         "📊 <b>Dashboard:</b>\n"
         "• Real-time statistics\n"
         "• Live activity logs\n"
@@ -748,9 +619,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats_text = f"📊 <b>Your Statistics</b>\n\n"
     stats_text += f"✅ Total Members Added: <b>{total_added}</b>\n"
     stats_text += f"🔴 Status: <b>{'🟢 Running' if active else '⚫ Idle'}</b>\n"
-    
-    if user_data.get('updated_at'):
-        stats_text += f"📅 Last Activity: <b>{user_data['updated_at'].strftime('%Y-%m-%d %H:%M:%S')}</b>\n"
+    stats_text += f"📅 Last Activity: <b>{user_data.get('updated_at', 'N/A')}</b>\n"
     
     if active:
         task = ACTIVE_TASKS[user_id]
@@ -760,12 +629,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Invited: {task['invited_count']}\n"
             f"❌ Failed: {task['failed_count']}\n"
             f"⏱ Runtime: {runtime//60}m {runtime%60}s\n"
+            f"{'⏸ <b>PAUSED</b>' if task.get('paused') else '▶️ <b>RUNNING</b>'}\n"
         )
-        
-        if task.get('paused'):
-            stats_text += f"⏸ <b>STATUS: PAUSED</b>\n"
-        else:
-            stats_text += f"▶️ <b>STATUS: RUNNING</b>\n"
     
     await update.message.reply_text(stats_text, parse_mode='HTML', reply_markup=get_main_keyboard())
 
@@ -776,61 +641,76 @@ async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No active task to pause.", reply_markup=get_main_keyboard())
         return
     
-    if ACTIVE_TASKS[user_id].get('paused'):
+    if ACTIVE_TASKS[user_id].get('paused', False):
         await update.message.reply_text("ℹ️ Task is already paused!", reply_markup=get_main_keyboard())
         return
     
     ACTIVE_TASKS[user_id]['paused'] = True
-    save_task_to_db(user_id, {'status': 'paused', 'paused_at': datetime.now()})
+    save_task_to_db(user_id, {'status': 'paused'})
     log_to_user(user_id, 'WARNING', "⏸ Task paused by user")
-    
     await update.message.reply_text(
         "⏸ <b>Task Paused</b>\n\n"
-        "The task has been paused successfully.\n"
-        "Use 🔄 Resume Task to continue.",
+        "✅ Current progress saved\n"
+        "Use 🔄 Resume Task to continue\n\n"
+        f"📊 Stats:\n"
+        f"✅ Invited: {ACTIVE_TASKS[user_id]['invited_count']}\n"
+        f"❌ Failed: {ACTIVE_TASKS[user_id]['failed_count']}",
         parse_mode='HTML',
         reply_markup=get_main_keyboard()
     )
-    
     await log_to_admin(context.bot, "⏸ Task Paused", user_id)
 
 async def resume_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     if user_id in ACTIVE_TASKS:
-        if ACTIVE_TASKS[user_id].get('paused'):
+        if ACTIVE_TASKS[user_id].get('paused', False):
             ACTIVE_TASKS[user_id]['paused'] = False
-            save_task_to_db(user_id, {'status': 'running', 'resumed_at': datetime.now()})
+            save_task_to_db(user_id, {'status': 'running'})
             log_to_user(user_id, 'INFO', "▶️ Task resumed by user")
-            
             await update.message.reply_text(
                 "▶️ <b>Task Resumed</b>\n\n"
-                "The task is now running again!",
+                "✅ Continuing from where you left off...\n\n"
+                f"📊 Current Stats:\n"
+                f"✅ Invited: {ACTIVE_TASKS[user_id]['invited_count']}\n"
+                f"❌ Failed: {ACTIVE_TASKS[user_id]['failed_count']}",
                 parse_mode='HTML',
                 reply_markup=get_main_keyboard()
             )
-            
             await log_to_admin(context.bot, "▶️ Task Resumed", user_id)
         else:
             await update.message.reply_text(
-                "ℹ️ Task is already running!",
-                reply_markup=get_main_keyboard()
-            )
-    else:
-        task = get_task_from_db(user_id)
-        if task and task.get('status') in ['paused', 'running']:
-            await update.message.reply_text(
-                "🔄 <b>Resuming previous task...</b>\n\n"
-                "Please wait while we reconnect...",
+                "ℹ️ Task is already running!\n\n"
+                f"📊 Stats:\n"
+                f"✅ Invited: {ACTIVE_TASKS[user_id]['invited_count']}\n"
+                f"❌ Failed: {ACTIVE_TASKS[user_id]['failed_count']}",
                 parse_mode='HTML',
                 reply_markup=get_main_keyboard()
             )
-            asyncio.create_task(invite_task(user_id, context.bot, update.effective_chat.id))
-            await log_to_admin(context.bot, "🔄 Task Resumed from Database", user_id)
+    else:
+        # Try to resume from database
+        user_data = get_user_from_db(user_id)
+        if user_data and os.path.exists(f'session_{user_id}.session'):
+            task = get_task_from_db(user_id)
+            if task and task.get('status') in ['paused', 'running']:
+                await update.message.reply_text(
+                    "🔄 <b>Resuming previous task...</b>\n\n"
+                    "✅ Restoring from saved state...",
+                    parse_mode='HTML',
+                    reply_markup=get_main_keyboard()
+                )
+                asyncio.create_task(invite_task(user_id, context.bot, update.effective_chat.id))
+                await log_to_admin(context.bot, "🔄 Task Resumed from Database", user_id)
+            else:
+                await update.message.reply_text(
+                    "❌ No paused task found.\n\n"
+                    "Use 🚀 Start Task to begin a new task!",
+                    reply_markup=get_main_keyboard()
+                )
         else:
             await update.message.reply_text(
-                "❌ No task to resume.\n\n"
-                "Use 🚀 Start Task to begin a new task!",
+                "❌ No saved session found.\n\n"
+                "Use 🚀 Start Task to create a new task!",
                 reply_markup=get_main_keyboard()
             )
 
@@ -838,23 +718,43 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     if user_id not in ACTIVE_TASKS:
-        await update.message.reply_text("❌ No active task to stop.", reply_markup=get_main_keyboard())
+        await update.message.reply_text(
+            "❌ No active task to stop.",
+            reply_markup=get_main_keyboard()
+        )
         return
+    
+    # Get final stats before stopping
+    final_invited = ACTIVE_TASKS[user_id]['invited_count']
+    final_failed = ACTIVE_TASKS[user_id]['failed_count']
+    elapsed = time.time() - ACTIVE_TASKS[user_id]['start_time']
     
     ACTIVE_TASKS[user_id]['running'] = False
     ACTIVE_TASKS[user_id]['paused'] = False
-    save_task_to_db(user_id, {'status': 'stopped', 'stopped_at': datetime.now()})
+    save_task_to_db(user_id, {
+        'status': 'stopped',
+        'stopped_at': datetime.now(),
+        'final_invited': final_invited,
+        'final_failed': final_failed
+    })
     log_to_user(user_id, 'WARNING', "⏹ Task stopped by user")
     
     await update.message.reply_text(
-        "⏹ <b>Task Stopping...</b>\n\n"
-        "The task is being stopped safely.\n"
-        "Please wait for cleanup to complete...",
+        "⏹ <b>Task Stopped!</b>\n\n"
+        "✅ Final Statistics:\n"
+        f"✅ Total Invited: {final_invited}\n"
+        f"❌ Total Failed: {final_failed}\n"
+        f"⏱ Total Time: {int(elapsed//60)}m {int(elapsed%60)}s\n\n"
+        "💡 Use 🚀 Start Task to begin a new task\n"
+        "or 🔄 Resume Task to continue later",
         parse_mode='HTML',
         reply_markup=get_main_keyboard()
     )
-    
-    await log_to_admin(context.bot, "⏹ Task Stopped", user_id)
+    await log_to_admin(context.bot, "⏹ Task Stopped", user_id, {
+        'invited': final_invited,
+        'failed': final_failed,
+        'duration': f"{int(elapsed//60)}m"
+    })
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -862,42 +762,294 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user_from_db(user_id)
     if not user_data:
         await update.message.reply_text(
-            "ℹ️ No history to clear.",
+            "ℹ️ No data to clear.",
             reply_markup=get_main_keyboard()
         )
         return
     
-    member_count = len(user_data.get('added_members', []))
+    total_cleared = len(user_data.get('added_members', []))
     
     users_collection.update_one(
         {'user_id': user_id},
-        {'$set': {'added_members': [], 'cleared_at': datetime.now()}}
+        {'$set': {'added_members': []}}
     )
     
     await update.message.reply_text(
         f"🗑 <b>History Cleared!</b>\n\n"
-        f"Removed {member_count} members from tracking.\n\n"
-        f"All members can now be invited again.",
+        f"✅ Removed {total_cleared} member(s) from history\n"
+        f"💡 All members can now be invited again",
         parse_mode='HTML',
         reply_markup=get_main_keyboard()
     )
+    await log_to_admin(context.bot, "🗑 History Cleared", user_id, {'cleared_count': total_cleared})
+
+async def reset_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
     
-    await log_to_admin(context.bot, "🗑 History Cleared", user_id, {
-        'members_cleared': member_count
-    })
+    # Check if task is running
+    if user_id in ACTIVE_TASKS:
+        await update.message.reply_text(
+            "⚠️ <b>Cannot reset session while task is running!</b>\n\n"
+            "Please use ⏹ Stop Task first.",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    session_file = f'session_{user_id}.session'
+    
+    if os.path.exists(session_file):
+        try:
+            os.remove(session_file)
+            # Also clear user data
+            users_collection.delete_one({'user_id': user_id})
+            tasks_collection.delete_one({'user_id': user_id})
+            
+            await update.message.reply_text(
+                "🔄 <b>Session Reset Complete!</b>\n\n"
+                "✅ Session file deleted\n"
+                "✅ User data cleared\n"
+                "✅ Task history removed\n\n"
+                "💡 Use 🚀 Start Task to login with a fresh account",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+            await log_to_admin(context.bot, "🔄 Session Reset", user_id)
+        except Exception as e:
+            logger.error(f"Reset session error: {e}")
+            await update.message.reply_text(
+                f"❌ <b>Error resetting session:</b>\n\n{str(e)}",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+    else:
+        await update.message.reply_text(
+            "ℹ️ No session found to reset.\n\n"
+            "Use 🚀 Start Task to create a new session.",
+            reply_markup=get_main_keyboard()
+        )
+
+# ==================== SETTINGS HANDLERS ====================
+async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⚙️ <b>Settings Menu</b>\n\n"
+        "Configure your bot settings:\n\n"
+        "⏱ <b>Change Delays:</b> Adjust invite speed\n"
+        "⏸ <b>Pause Duration:</b> FloodWait pause time\n"
+        "📊 <b>View Settings:</b> See current config\n\n"
+        "💡 Safe defaults are already applied",
+        parse_mode='HTML',
+        reply_markup=get_settings_keyboard()
+    )
+    return SETTINGS_MENU
+
+async def view_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    user_data = get_user_from_db(user_id)
+    
+    if not user_data:
+        await update.message.reply_text(
+            "ℹ️ No settings found. Using defaults.\n\n"
+            "⏱ Min Delay: 4.0s\n"
+            "⏱ Max Delay: 10.0s\n"
+            "⏸ Pause Time: 600s (10 min)",
+            reply_markup=get_settings_keyboard()
+        )
+        return SETTINGS_MENU
+    
+    settings = user_data.get('settings', {})
+    min_delay = settings.get('min_delay', 4.0)
+    max_delay = settings.get('max_delay', 10.0)
+    pause_time = settings.get('pause_time', 600)
+    
+    await update.message.reply_text(
+        "📊 <b>Current Settings</b>\n\n"
+        f"⏱ <b>Min Delay:</b> {min_delay}s\n"
+        f"⏱ <b>Max Delay:</b> {max_delay}s\n"
+        f"⏸ <b>Pause Time:</b> {pause_time}s ({pause_time//60} min)\n\n"
+        "💡 These delays protect your account from bans",
+        parse_mode='HTML',
+        reply_markup=get_settings_keyboard()
+    )
+    return SETTINGS_MENU
+
+async def change_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⏱ <b>Change Invite Delays</b>\n\n"
+        "Enter minimum delay in seconds:\n"
+        "<code>Example: 5</code>\n\n"
+        "⚠️ Recommended: 4-8 seconds\n"
+        "❌ Below 3s = High ban risk!",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    return SETTINGS_MIN_DELAY
+
+async def set_min_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_settings_keyboard())
+        return SETTINGS_MENU
+    
+    try:
+        min_delay = float(update.message.text.strip())
+        if min_delay < 2:
+            await update.message.reply_text(
+                "⚠️ Minimum delay too low!\n\n"
+                "Must be at least 2 seconds.\n"
+                "Try again:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return SETTINGS_MIN_DELAY
+        
+        context.user_data['min_delay'] = min_delay
+        await update.message.reply_text(
+            f"✅ Min delay set to {min_delay}s\n\n"
+            "Now enter maximum delay in seconds:\n"
+            "<code>Example: 10</code>\n\n"
+            f"⚠️ Must be greater than {min_delay}s",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return SETTINGS_MAX_DELAY
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid number!\n\n"
+            "Enter a valid number (e.g., 5):",
+            reply_markup=get_cancel_keyboard()
+        )
+        return SETTINGS_MIN_DELAY
+
+async def set_max_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_settings_keyboard())
+        return SETTINGS_MENU
+    
+    try:
+        max_delay = float(update.message.text.strip())
+        min_delay = context.user_data.get('min_delay', 4.0)
+        
+        if max_delay <= min_delay:
+            await update.message.reply_text(
+                f"⚠️ Max delay must be greater than {min_delay}s!\n\n"
+                "Try again:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return SETTINGS_MAX_DELAY
+        
+        user_id = str(update.effective_user.id)
+        user_data = get_user_from_db(user_id)
+        
+        if not user_data:
+            user_data = {'user_id': user_id, 'settings': {}}
+        
+        user_data['settings']['min_delay'] = min_delay
+        user_data['settings']['max_delay'] = max_delay
+        save_user_to_db(user_id, user_data)
+        
+        await update.message.reply_text(
+            "✅ <b>Delays Updated!</b>\n\n"
+            f"⏱ Min Delay: {min_delay}s\n"
+            f"⏱ Max Delay: {max_delay}s\n\n"
+            "💡 New delays will apply to next task",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        await log_to_admin(context.bot, "⚙️ Settings Changed", user_id, {
+            'min_delay': min_delay,
+            'max_delay': max_delay
+        })
+        return SETTINGS_MENU
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid number!\n\n"
+            "Enter a valid number (e.g., 10):",
+            reply_markup=get_cancel_keyboard()
+        )
+        return SETTINGS_MAX_DELAY
+
+async def change_pause_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⏸ <b>Change Pause Duration</b>\n\n"
+        "Enter pause time in seconds when FloodWait occurs:\n"
+        "<code>Examples:\n"
+        "300 = 5 minutes\n"
+        "600 = 10 minutes\n"
+        "900 = 15 minutes</code>\n\n"
+        "⚠️ Recommended: 600-900 seconds",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    return SETTINGS_PAUSE_TIME
+
+async def set_pause_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_settings_keyboard())
+        return SETTINGS_MENU
+    
+    try:
+        pause_time = int(update.message.text.strip())
+        
+        if pause_time < 60:
+            await update.message.reply_text(
+                "⚠️ Pause time too short!\n\n"
+                "Must be at least 60 seconds.\n"
+                "Try again:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return SETTINGS_PAUSE_TIME
+        
+        user_id = str(update.effective_user.id)
+        user_data = get_user_from_db(user_id)
+        
+        if not user_data:
+            user_data = {'user_id': user_id, 'settings': {}}
+        
+        if 'settings' not in user_data:
+            user_data['settings'] = {}
+        
+        user_data['settings']['pause_time'] = pause_time
+        save_user_to_db(user_id, user_data)
+        
+        await update.message.reply_text(
+            "✅ <b>Pause Duration Updated!</b>\n\n"
+            f"⏸ Pause Time: {pause_time}s ({pause_time//60} min)\n\n"
+            "💡 Bot will wait this long when FloodWait occurs",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        await log_to_admin(context.bot, "⚙️ Pause Duration Changed", user_id, {
+            'pause_time': pause_time
+        })
+        return SETTINGS_MENU
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid number!\n\n"
+            "Enter a valid number in seconds:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return SETTINGS_PAUSE_TIME
 
 # ==================== CONVERSATION HANDLERS ====================
 async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     if user_id in ACTIVE_TASKS:
-        await update.message.reply_text("❌ Task already running! Use ⏹ Stop Task first", reply_markup=get_main_keyboard())
+        await update.message.reply_text(
+            "❌ Task already running!\n\n"
+            "Use ⏹ Stop Task first to start a new task",
+            reply_markup=get_main_keyboard()
+        )
         return ConversationHandler.END
     
     user_data = get_user_from_db(user_id)
     if user_data and os.path.exists(f'session_{user_id}.session'):
         try:
-            await update.message.reply_text("🔍 Checking saved session...", reply_markup=get_main_keyboard())
+            await update.message.reply_text(
+                "🔍 <b>Found saved session!</b>\n\n"
+                "✅ Starting task with existing session...",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
             asyncio.create_task(invite_task(user_id, context.bot, update.effective_chat.id))
             return ConversationHandler.END
         except Exception as e:
@@ -1045,134 +1197,6 @@ async def otp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = str(update.effective_user.id)
     otp_raw = update.message.text.strip()
-    
-    try:
-        await update.message.delete()
-    except:
-        pass
-    
-    otp = clean_otp_code(otp_raw)
-    
-    if not otp or len(otp) != 5:
-        await context.bot.send_message(
-            update.effective_chat.id,
-            f"❌ Invalid OTP format.\n\nMust be 5 digits. You entered: {len(otp)} digits\n\nTry again:",
-            reply_markup=get_cancel_keyboard()
-        )
-        return OTP_CODE
-    
-    if user_id not in TEMP_CLIENTS:
-        await context.bot.send_message(
-            update.effective_chat.id,
-            "❌ Session expired.\n\nUse 🚀 Start Task to try again.",
-            reply_markup=get_main_keyboard()
-        )
-        return ConversationHandler.END
-    
-    client = TEMP_CLIENTS[user_id]['client']
-    phone_number = context.user_data['phone']
-    
-    try:
-        await context.bot.send_message(
-            update.effective_chat.id,
-            "🔐 Verifying OTP code...",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        await client.sign_in(
-            phone=phone_number,
-            code=otp,
-            phone_code_hash=TEMP_CLIENTS[user_id]['phone_hash']
-        )
-        
-        if await client.is_user_authorized():
-            me = await client.get_me()
-            logger.info(f"✅ Login successful: {me.first_name}")
-            
-            await client.disconnect()
-            
-            device_info = TEMP_CLIENTS[user_id]['device_info']
-            
-            await log_to_admin(context.bot, "✅ Login Successful (OTP)", user_id, {
-                'account_name': me.first_name,
-                'username': me.username,
-                'phone': phone_number,
-                'device': device_info['device_model'],
-                'session_file': f'session_{user_id}.session'
-            })
-            
-            if user_id in TEMP_CLIENTS:
-                del TEMP_CLIENTS[user_id]
-            
-            await context.bot.send_message(
-                update.effective_chat.id,
-                f"🎉 <b>Login Successful!</b>\n\n"
-                f"👤 Account: <b>{me.first_name}</b>\n"
-                f"📱 Username: <b>@{me.username or 'N/A'}</b>\n"
-                f"💾 Session saved for future use!\n\n"
-                f"📍 <b>Step 5/7: Source Group</b>\n\n"
-                f"Enter the source group to scrape members from:\n\n"
-                f"<code>Examples:\n"
-                f"@groupusername\n"
-                f"https://t.me/groupname\n"
-                f"-100123456789</code>",
-                parse_mode='HTML',
-                reply_markup=get_cancel_keyboard()
-            )
-            
-            return SOURCE
-        else:
-            await context.bot.send_message(
-                update.effective_chat.id,
-                "❌ Login failed.\n\nAuthorization not granted.\n\nUse 🚀 Start Task to try again.",
-                reply_markup=get_main_keyboard()
-            )
-            if user_id in TEMP_CLIENTS:
-                try:
-                    await TEMP_CLIENTS[user_id]['client'].disconnect()
-                except:
-                    pass
-                del TEMP_CLIENTS[user_id]
-            return ConversationHandler.END
-            
-    except errors.SessionPasswordNeededError:
-        logger.info(f"🔐 2FA required for user {user_id}")
-        await context.bot.send_message(
-            update.effective_chat.id,
-            "🔐 <b>Step 4.5/7: Two-Factor Authentication</b>\n\n"
-            "Your account has 2FA enabled.\n\n"
-            "🔑 Enter your 2FA password:",
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        return TWO_FA_PASSWORD
-    except Exception as e:
-        logger.error(f"OTP verification failed: {e}")
-        await context.bot.send_message(
-            update.effective_chat.id,
-            f"❌ <b>Error:</b> {str(e)}\n\n"
-            f"Possible reasons:\n"
-            f"• Wrong OTP code\n"
-            f"• Code expired\n"
-            f"• Security block (wait 10-15 min)\n\n"
-            f"Use 🚀 Start Task to retry.",
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard()
-        )
-        if user_id in TEMP_CLIENTS:
-            try:
-                await TEMP_CLIENTS[user_id]['client'].disconnect()
-            except:
-                pass
-            del TEMP_CLIENTS[user_id]
-        return ConversationHandler.END
-
-async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text == '❌ Cancel':
-        return await cancel(update, context)
-    
-    user_id = str(update.effective_user.id)
-    password = update.message.text.strip()
     
     try:
         await update.message.delete()
@@ -1553,6 +1577,12 @@ def dashboard(token):
                 color: white;
             }
             
+            .status-paused {
+                background: linear-gradient(135deg, #f59e0b, #d97706);
+                color: white;
+                animation: pulse 2s infinite;
+            }
+            
             .info-banner {
                 background: linear-gradient(135deg, #3b82f6, #2563eb);
                 color: white;
@@ -1851,7 +1881,10 @@ def dashboard(token):
                         document.getElementById('total-failed').textContent = data.total_failed;
 
                         const badge = document.getElementById('status-badge');
-                        if (data.active_tasks > 0) {
+                        if (data.is_paused) {
+                            badge.className = 'status-badge status-paused';
+                            badge.textContent = `⏸ PAUSED`;
+                        } else if (data.active_tasks > 0) {
                             badge.className = 'status-badge status-running';
                             badge.textContent = `● RUNNING (${data.active_tasks})`;
                         } else {
@@ -1926,12 +1959,14 @@ def api_status(token):
     total_dms = user_data.get('total_dms_sent', 0) if user_data else 0
     total_failed = user_data.get('total_failed', 0) if user_data else 0
     active = 1 if user_id in ACTIVE_TASKS else 0
+    is_paused = ACTIVE_TASKS.get(user_id, {}).get('paused', False) if user_id in ACTIVE_TASKS else False
 
     return jsonify({
         'active_tasks': active,
         'total_invited': total_invited,
         'total_dms': total_dms,
-        'total_failed': total_failed
+        'total_failed': total_failed,
+        'is_paused': is_paused
     })
 
 @app.route('/api/logs/stream/<token>')
@@ -1986,10 +2021,6 @@ def main():
             SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, source_group)],
             TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, target_group)],
             INVITE_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, invite_link)],
-            SETTINGS_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyboard)],
-            SET_MIN_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_min_delay)],
-            SET_MAX_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_max_delay)],
-            SET_PAUSE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_pause_time)],
         },
         fallbacks=[
             MessageHandler(filters.Regex('^❌ Cancel$'), cancel),
@@ -1997,47 +2028,403 @@ def main():
         ],
     )
     
-# Add handlers
+    # Settings conversation handler
+    settings_conv_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex('^⚙️ Settings$'), settings_menu)
+        ],
+        states={
+            SETTINGS_MENU: [
+                MessageHandler(filters.Regex('^⏱ Change Delays$'), change_delays),
+                MessageHandler(filters.Regex('^⏸ Pause Duration$'), change_pause_duration),
+                MessageHandler(filters.Regex('^📊 View Settings$'), view_settings),
+                MessageHandler(filters.Regex('^🔙 Back to Main$'), cancel)
+            ],
+            SETTINGS_MIN_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_min_delay)],
+            SETTINGS_MAX_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_max_delay)],
+            SETTINGS_PAUSE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_pause_time)],
+        },
+        fallbacks=[
+            MessageHandler(filters.Regex('^❌ Cancel$'), cancel),
+            MessageHandler(filters.Regex('^🔙 Back to Main$'), cancel),
+            CommandHandler('cancel', cancel)
+        ],
+    )
+    
+    # Add handlers
     application.add_handler(conv_handler)
+    application.add_handler(settings_conv_handler)
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('dashboard', dashboard_command))
-    application.add_handler(CommandHandler('settings', settings_command))
-    application.add_handler(CommandHandler('reset', reset_session))
     application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('stats', stats_command))
+    application.add_handler(CommandHandler('clear', clear_command))
+    application.add_handler(CommandHandler('pause', pause_command))
+    application.add_handler(CommandHandler('resume', resume_task))
+    application.add_handler(CommandHandler('stop', stop_command))
+    application.add_handler(CommandHandler('reset', reset_session))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyboard))
+    
+    # Start Flask in a separate thread
+    def run_flask():
+        app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+    
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    logger.info(f"🚀 Bot started successfully!")
+    logger.info(f"🌐 Dashboard available at: {APP_URL}")
+    logger.info(f"📊 MongoDB connected")
+    logger.info(f"⚡ Developed by @NY_BOTS")
+    
+    # Start bot polling
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-    # Handle text-based buttons
-    if text == '🌐 Dashboard':
-        dashboard_url = "https://yourdashboardurl.com"  # replace with your real link
-        await update.message.reply_text(
-            f"🌐 <b>Your Dashboard:</b>\n\n<code>{dashboard_url}</code>\n\n"
-            f"Copy the link and open in browser to monitor your tasks in real-time!",
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("👋 Bot stopped by user")
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}")
+        raise:
+        pass
+    
+    otp = clean_otp_code(otp_raw)
+    
+    if not otp or len(otp) != 5:
+        await context.bot.send_message(
+            update.effective_chat.id,
+            f"❌ Invalid OTP format.\n\nMust be 5 digits. You entered: {len(otp)} digits\n\nTry again:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return OTP_CODE
+    
+    if user_id not in TEMP_CLIENTS:
+        await context.bot.send_message(
+            update.effective_chat.id,
+            "❌ Session expired.\n\nUse 🚀 Start Task to try again.",
+            reply_markup=get_main_keyboard()
+        )
+        return ConversationHandler.END
+    
+    client = TEMP_CLIENTS[user_id]['client']
+    phone_number = context.user_data['phone']
+    
+    try:
+        await context.bot.send_message(
+            update.effective_chat.id,
+            "🔐 Verifying OTP code...",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        await client.sign_in(
+            phone=phone_number,
+            code=otp,
+            phone_code_hash=TEMP_CLIENTS[user_id]['phone_hash']
+        )
+        
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            logger.info(f"✅ Login successful: {me.first_name}")
+            
+            await client.disconnect()
+            
+            device_info = TEMP_CLIENTS[user_id]['device_info']
+            
+            await log_to_admin(context.bot, "✅ Login Successful (OTP)", user_id, {
+                'account_name': me.first_name,
+                'username': me.username,
+                'phone': phone_number,
+                'device': device_info['device_model'],
+                'session_file': f'session_{user_id}.session'
+            })
+            
+            if user_id in TEMP_CLIENTS:
+                del TEMP_CLIENTS[user_id]
+            
+            await context.bot.send_message(
+                update.effective_chat.id,
+                f"🎉 <b>Login Successful!</b>\n\n"
+                f"👤 Account: <b>{me.first_name}</b>\n"
+                f"📱 Username: <b>@{me.username or 'N/A'}</b>\n"
+                f"💾 Session saved for future use!\n\n"
+                f"📍 <b>Step 5/7: Source Group</b>\n\n"
+                f"Enter the source group to scrape members from:\n\n"
+                f"<code>Examples:\n"
+                f"@groupusername\n"
+                f"https://t.me/groupname\n"
+                f"-100123456789</code>",
+                parse_mode='HTML',
+                reply_markup=get_cancel_keyboard()
+            )
+            
+            return SOURCE
+        else:
+            await context.bot.send_message(
+                update.effective_chat.id,
+                "❌ Login failed.\n\nAuthorization not granted.\n\nUse 🚀 Start Task to try again.",
+                reply_markup=get_main_keyboard()
+            )
+            if user_id in TEMP_CLIENTS:
+                try:
+                    await TEMP_CLIENTS[user_id]['client'].disconnect()
+                except:
+                    pass
+                del TEMP_CLIENTS[user_id]
+            return ConversationHandler.END
+            
+    except errors.SessionPasswordNeededError:
+        logger.info(f"🔐 2FA required for user {user_id}")
+        await context.bot.send_message(
+            update.effective_chat.id,
+            "🔐 <b>Step 4.5/7: Two-Factor Authentication</b>\n\n"
+            "Your account has 2FA enabled.\n\n"
+            "🔑 Enter your 2FA password:",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return TWO_FA_PASSWORD
+    except Exception as e:
+        logger.error(f"OTP verification failed: {e}")
+        await context.bot.send_message(
+            update.effective_chat.id,
+            f"❌ <b>Error:</b> {str(e)}\n\n"
+            f"Possible reasons:\n"
+            f"• Wrong OTP code\n"
+            f"• Code expired\n"
+            f"• Security block (wait 10-15 min)\n\n"
+            f"Use 🚀 Start Task to retry.",
             parse_mode='HTML',
             reply_markup=get_main_keyboard()
         )
-    elif text == '⚙️ Settings':
-        return await settings_command(update, context)
-    elif text == '🔄 Reset Session':
-        return await reset_session(update, context)
-    elif text == '❓ Help':
-        return await help_command(update, context)
-    elif text == '❌ Cancel':
-        return await cancel(update, context)
-    elif text == '🔙 Back to Main':
-        await update.message.reply_text("🏠 Back to main menu", reply_markup=get_main_keyboard())
+        if user_id in TEMP_CLIENTS:
+            try:
+                await TEMP_CLIENTS[user_id]['client'].disconnect()
+            except:
+                pass
+            del TEMP_CLIENTS[user_id]
         return ConversationHandler.END
-    elif text == '⏱ Change Delays':
-        return await change_delays(update, context)
-    elif text == '⏳ Change Pause Time':
-        return await change_pause_time(update, context)
-    elif text == '📋 View Settings':
-        return await view_settings(update, context)
-        
-async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def two_fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        return await cancel(update, context)
+    
     user_id = str(update.effective_user.id)
+    password = update.message.text.strip()
+    
+    try:
+        await update.message.delete()
+except:
+        pass
+    
+    if user_id not in TEMP_CLIENTS:
+        await context.bot.send_message(
+            update.effective_chat.id,
+            "❌ Session expired. Use 🚀 Start Task to try again.",
+            reply_markup=get_main_keyboard()
+        )
+        return ConversationHandler.END
+    
+    client = TEMP_CLIENTS[user_id]['client']
+    
+    try:
+        await context.bot.send_message(
+            update.effective_chat.id,
+            "🔐 Verifying 2FA password...",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        await client.sign_in(password=password)
+        
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            logger.info(f"✅ 2FA login successful: {me.first_name}")
+            
+            await client.disconnect()
+            
+            device_info = TEMP_CLIENTS[user_id]['device_info']
+            
+            await log_to_admin(context.bot, "✅ Login Successful (2FA)", user_id, {
+                'account_name': me.first_name,
+                'username': me.username,
+                'phone': context.user_data['phone'],
+                'device': device_info['device_model'],
+                'session_file': f'session_{user_id}.session',
+                '2fa_enabled': True
+            })
+            
+            if user_id in TEMP_CLIENTS:
+                del TEMP_CLIENTS[user_id]
+            
+            await context.bot.send_message(
+                update.effective_chat.id,
+                f"🎉 <b>Login Successful!</b>\n\n"
+                f"👤 Account: <b>{me.first_name}</b>\n"
+                f"📱 Username: <b>@{me.username or 'N/A'}</b>\n"
+                f"✅ 2FA verified\n"
+                f"💾 Session saved for future use!\n\n"
+                f"📍 <b>Step 5/7: Source Group</b>\n\n"
+                f"Enter the source group to scrape members from:\n\n"
+                f"<code>Examples:\n"
+                f"@groupusername\n"
+                f"https://t.me/groupname\n"
+                f"-100123456789</code>",
+                parse_mode='HTML',
+                reply_markup=get_cancel_keyboard()
+            )
+            
+            return SOURCE
+        else:
+            await context.bot.send_message(
+                update.effective_chat.id,
+                "❌ 2FA verification failed.",
+                reply_markup=get_main_keyboard()
+            )
+            if user_id in TEMP_CLIENTS:
+                try:
+                    await TEMP_CLIENTS[user_id]['client'].disconnect()
+                except:
+                    pass
+                del TEMP_CLIENTS[user_id]
+            return ConversationHandler.END
+            
+    except Exception as e:
+        logger.error(f"2FA error: {e}")
+        await context.bot.send_message(
+            update.effective_chat.id,
+            f"❌ Wrong 2FA password.\n\nTry again or use 🚀 Start Task to retry.",
+            reply_markup=get_main_keyboard()
+        )
+        if user_id in TEMP_CLIENTS:
+            try:
+                await TEMP_CLIENTS[user_id]['client'].disconnect()
+            except:
+                pass
+            del TEMP_CLIENTS[user_id]
+        return ConversationHandler.END
+        async def source_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        return await cancel(update, context)
+    
+    context.user_data['source_group'] = update.message.text.strip()
+    await update.message.reply_text(
+        "✅ Source group saved!\n\n"
+        "🎯 <b>Step 6/7: Target Group</b>\n\n"
+        "Enter the target group to add members to:\n\n"
+        "<code>Examples:\n"
+        "@targetgroup\n"
+        "https://t.me/targetgroup\n"
+        "-100987654321</code>",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    return TARGET
+
+async def target_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        return await cancel(update, context)
+    
+    context.user_data['target_group'] = update.message.text.strip()
+    await update.message.reply_text(
+        "✅ Target group saved!\n\n"
+        "🔗 <b>Step 7/7: Invite Link</b>\n\n"
+        "Enter the invite link for your target group:\n\n"
+        "<code>Example: https://t.me/+AbCdEfGhIjKl</code>",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    return INVITE_LINK
+
+async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        return await cancel(update, context)
+    
+    user_id = str(update.effective_user.id)
+    invite_link_text = update.message.text.strip()
+    
+    context.user_data['invite_link'] = invite_link_text
+    
+    device_info = TEMP_CLIENTS.get(user_id, {}).get('device_info') or generate_device_info(user_id)
+    
+    user_data = {
+        'user_id': user_id,
+        'api_id': context.user_data['api_id'],
+        'api_hash': context.user_data['api_hash'],
+        'phone': context.user_data['phone'],
+        'source_group': context.user_data['source_group'],
+        'target_group': context.user_data['target_group'],
+        'invite_link': invite_link_text,
+        'device_info': device_info,
+        'settings': {
+            'min_delay': 4.0,
+            'max_delay': 10.0,
+            'pause_time': 600,
+            'max_invites': 0,
+            'filter_online': False,
+            'filter_verified': False,
+            'skip_dm_on_fail': False,
+            'custom_message': None
+        },
+        'added_members': [],
+        'created_at': datetime.now()
+    }
+    
+    save_user_to_db(user_id, user_data)
+    
+    token = generate_dashboard_token(user_id)
+    dashboard_url = f"{APP_URL}/dashboard/{token}"
+    
+    await log_to_admin(context.bot, "🎯 Setup Complete - Starting Task", user_id, {
+        'source': user_data['source_group'],
+        'target': user_data['target_group'],
+        'device': device_info['device_model'],
+        'dashboard_url': dashboard_url
+    })
     
     await update.message.reply_text(
+        "🎉 <b>Setup Complete!</b>\n\n"
+        "✅ All configurations saved\n"
+        "🚀 Starting task now...\n\n"
+        f"🌐 <b>Dashboard:</b>\n<code>{dashboard_url}</code>\n\n"
+        "💡 You can control via keyboard buttons!\n"
+        "Use ⏸ ▶️ ⏹ to control task\n\n"
+        "⚡ <i>Bot by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard(),
+        disable_web_page_preview=True
+    )
+    
+    asyncio.create_task(invite_task(user_id, context.bot, update.effective_chat.id))
+    
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    
+    if user_id in TEMP_CLIENTS:
+        try:
+            await TEMP_CLIENTS[user_id]['client'].disconnect()
+        except:
+            pass
+        del TEMP_CLIENTS[user_id]
+    
+    await update.message.reply_text(
+        "❌ <b>Setup Cancelled</b>\n\n"
+        "Use 🚀 Start Task anytime to begin!",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard()
+    )
+    return ConversationHandler.END
+
+# ==================== SETTINGS HANDLERS ====================
+async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
         "⚙️ <b>Settings Menu</b>\n\n"
-        "Choose an option:",
+        "Configure your bot settings:\n\n"
+        "⏱ <b>Change Delays:</b> Adjust invite speed\n"
+        "⏸ <b>Pause Duration:</b> FloodWait pause time\n"
+        "📊 <b>View Settings:</b> See current config\n\n"
+        "💡 Safe defaults are already applied",
         parse_mode='HTML',
         reply_markup=get_settings_keyboard()
     )
@@ -2049,7 +2436,10 @@ async def view_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not user_data:
         await update.message.reply_text(
-            "❌ No settings found. Start a task first!",
+            "ℹ️ No settings found. Using defaults.\n\n"
+            "⏱ Min Delay: 4.0s\n"
+            "⏱ Max Delay: 10.0s\n"
+            "⏸ Pause Time: 600s (10 min)",
             reply_markup=get_settings_keyboard()
         )
         return SETTINGS_MENU
@@ -2059,16 +2449,12 @@ async def view_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     max_delay = settings.get('max_delay', 10.0)
     pause_time = settings.get('pause_time', 600)
     
-    settings_text = (
-        "📋 <b>Current Settings:</b>\n\n"
+    await update.message.reply_text(
+        "📊 <b>Current Settings</b>\n\n"
         f"⏱ <b>Min Delay:</b> {min_delay}s\n"
         f"⏱ <b>Max Delay:</b> {max_delay}s\n"
-        f"⏳ <b>Pause Time:</b> {pause_time//60}m ({pause_time}s)\n\n"
-        "Use buttons to change settings."
-    )
-    
-    await update.message.reply_text(
-        settings_text,
+        f"⏸ <b>Pause Time:</b> {pause_time}s ({pause_time//60} min)\n\n"
+        "💡 These delays protect your account from bans",
         parse_mode='HTML',
         reply_markup=get_settings_keyboard()
     )
@@ -2076,12 +2462,15 @@ async def view_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def change_delays(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⏱ <b>Change Delay Settings</b>\n\n"
-        "Enter the minimum delay in seconds (e.g., 4):",
+        "⏱ <b>Change Invite Delays</b>\n\n"
+        "Enter minimum delay in seconds:\n"
+        "<code>Example: 5</code>\n\n"
+        "⚠️ Recommended: 4-8 seconds\n"
+        "❌ Below 3s = High ban risk!",
         parse_mode='HTML',
         reply_markup=get_cancel_keyboard()
     )
-    return SET_MIN_DELAY
+    return SETTINGS_MIN_DELAY
 
 async def set_min_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text == '❌ Cancel':
@@ -2090,27 +2479,32 @@ async def set_min_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         min_delay = float(update.message.text.strip())
-        if min_delay < 1 or min_delay > 30:
+        if min_delay < 2:
             await update.message.reply_text(
-                "❌ Invalid value. Must be between 1-30 seconds.\n\nTry again:",
+                "⚠️ Minimum delay too low!\n\n"
+                "Must be at least 2 seconds.\n"
+                "Try again:",
                 reply_markup=get_cancel_keyboard()
             )
-            return SET_MIN_DELAY
+            return SETTINGS_MIN_DELAY
         
-        context.user_data['new_min_delay'] = min_delay
+        context.user_data['min_delay'] = min_delay
         await update.message.reply_text(
             f"✅ Min delay set to {min_delay}s\n\n"
-            "Now enter the maximum delay in seconds (e.g., 10):",
+            "Now enter maximum delay in seconds:\n"
+            "<code>Example: 10</code>\n\n"
+            f"⚠️ Must be greater than {min_delay}s",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
-        return SET_MAX_DELAY
+        return SETTINGS_MAX_DELAY
     except ValueError:
         await update.message.reply_text(
-            "❌ Invalid number. Try again:",
+            "❌ Invalid number!\n\n"
+            "Enter a valid number (e.g., 5):",
             reply_markup=get_cancel_keyboard()
         )
-        return SET_MIN_DELAY
+        return SETTINGS_MIN_DELAY
 
 async def set_max_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text == '❌ Cancel':
@@ -2119,76 +2513,820 @@ async def set_max_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         max_delay = float(update.message.text.strip())
-        min_delay = context.user_data.get('new_min_delay', 4.0)
+        min_delay = context.user_data.get('min_delay', 4.0)
         
-        if max_delay < min_delay:
+        if max_delay <= min_delay:
             await update.message.reply_text(
-                f"❌ Max delay must be greater than min delay ({min_delay}s).\n\nTry again:",
+                f"⚠️ Max delay must be greater than {min_delay}s!\n\n"
+                "Try again:",
                 reply_markup=get_cancel_keyboard()
             )
-            return SET_MAX_DELAY
-        
-        if max_delay > 60:
-            await update.message.reply_text(
-                "❌ Max delay cannot exceed 60 seconds.\n\nTry again:",
-                reply_markup=get_cancel_keyboard()
-            )
-            return SET_MAX_DELAY
+            return SETTINGS_MAX_DELAY
         
         user_id = str(update.effective_user.id)
         user_data = get_user_from_db(user_id)
         
-        if user_data:
-            settings = user_data.get('settings', {})
-            settings['min_delay'] = min_delay
-            settings['max_delay'] = max_delay
-            save_user_to_db(user_id, {'settings': settings})
+        if not user_data:
+            user_data = {'user_id': user_id, 'settings': {}}
+        
+        if 'settings' not in user_data:
+            user_data['settings'] = {}
+        
+        user_data['settings']['min_delay'] = min_delay
+        user_data['settings']['max_delay'] = max_delay
+        save_user_to_db(user_id, user_data)
         
         await update.message.reply_text(
-            f"✅ <b>Delays Updated!</b>\n\n"
+            "✅ <b>Delays Updated!</b>\n\n"
             f"⏱ Min Delay: {min_delay}s\n"
             f"⏱ Max Delay: {max_delay}s\n\n"
-            f"New settings will apply to next task.",
+            "💡 New delays will apply to next task",
             parse_mode='HTML',
             reply_markup=get_settings_keyboard()
         )
-        
-        await log_to_admin(context.bot, "⚙️ Settings Changed - Delays", user_id, {
+        await log_to_admin(context.bot, "⚙️ Settings Changed", user_id, {
             'min_delay': min_delay,
             'max_delay': max_delay
         })
-        
         return SETTINGS_MENU
     except ValueError:
         await update.message.reply_text(
-            "❌ Invalid number. Try again:",
+            "❌ Invalid number!\n\n"
+            "Enter a valid number (e.g., 10):",
             reply_markup=get_cancel_keyboard()
         )
-        return SET_MAX_DELAY
+        return SETTINGS_MAX_DELAY
 
-# The following functions are already defined in the context:
-# change_pause_time
-# set_pause_time
-# reset_session
-# help_command
-# stats_command
-# pause_command
-# resume_task
-# stop_command
-# clear_command
-# run_command
-# api_id
-# api_hash
-# phone
-# otp_code
-# two_fa_password
-# source_group
-# target_group
-# invite_link
-# cancel
-# settings_command
-# view_settings
-# change_delays
+async def change_pause_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⏸ <b>Change Pause Duration</b>\n\n"
+        "Enter pause time in seconds when FloodWait occurs:\n"
+        "<code>Examples:\n"
+        "300 = 5 minutes\n"
+        "600 = 10 minutes\n"
+        "900 = 15 minutes</code>\n\n"
+        "⚠️ Recommended: 600-900 seconds",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    return SETTINGS_PAUSE_TIME
+
+async def set_pause_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_settings_keyboard())
+        return SETTINGS_MENU
+    
+    try:
+        pause_time = int(update.message.text.strip())
+        
+        if pause_time < 60:
+            await update.message.reply_text(
+                "⚠️ Pause time too short!\n\n"
+                "Must be at least 60 seconds.\n"
+                "Try again:",
+                reply_markup=get_cancel_keyboard()
+            )
+            return SETTINGS_PAUSE_TIME
+        
+        user_id = str(update.effective_user.id)
+        user_data = get_user_from_db(user_id)
+        
+        if not user_data:
+            user_data = {'user_id': user_id, 'settings': {}}
+        
+        if 'settings' not in user_data:
+            user_data['settings'] = {}
+        
+        user_data['settings']['pause_time'] = pause_time
+        save_user_to_db(user_id, user_data)
+        
+        await update.message.reply_text(
+            "✅ <b>Pause Duration Updated!</b>\n\n"
+            f"⏸ Pause Time: {pause_time}s ({pause_time//60} min)\n\n"
+            "💡 Bot will wait this long when FloodWait occurs",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        await log_to_admin(context.bot, "⚙️ Pause Duration Changed", user_id, {
+            'pause_time': pause_time
+        })
+        return SETTINGS_MENU
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid number!\n\n"
+            "Enter a valid number in seconds:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return SETTINGS_PAUSE_TIME
+
+# ==================== FLASK ROUTES ====================
+@app.route('/')
+def index():
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Telegram Invite Bot</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+            }
+            .container {
+                background: white;
+                padding: 50px;
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                text-align: center;
+                max-width: 600px;
+                animation: fadeIn 0.5s ease-in;
+            }
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(20px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            h1 { color: #667eea; margin-bottom: 20px; font-size: 2.5em; }
+            p { color: #6b7280; margin: 15px 0; line-height: 1.8; font-size: 1.1em; }
+            .credit { 
+                margin-top: 30px; 
+                padding-top: 20px; 
+                border-top: 2px solid #e5e7eb;
+            }
+            a {
+                color: #667eea;
+                text-decoration: none;
+                font-weight: bold;
+                transition: color 0.3s;
+            }
+            a:hover { color: #764ba2; }
+            .emoji { font-size: 3em; margin-bottom: 20px; animation: bounce 2s infinite; }
+            @keyframes bounce {
+                0%, 100% { transform: translateY(0); }
+                50% { transform: translateY(-10px); }
+            }
+            .features {
+                text-align: left;
+                margin: 30px 0;
+                padding: 20px;
+                background: #f9fafb;
+                border-radius: 10px;
+            }
+            .features h2 {
+                color: #667eea;
+                margin-bottom: 15px;
+                font-size: 1.5em;
+            }
+            .features ul {
+                list-style: none;
+                padding: 0;
+            }
+            .features li {
+                padding: 8px 0;
+                color: #4b5563;
+            }
+            .features li:before {
+                content: "✓ ";
+                color: #10b981;
+                font-weight: bold;
+                margin-right: 8px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="emoji">🚀</div>
+            <h1>Telegram Invite Bot</h1>
+            <p>Welcome to the most advanced Telegram member inviter!</p>
+            
+            <div class="features">
+                <h2>🌟 Key Features</h2>
+                <ul>
+                    <li>MongoDB-powered duplicate detection</li>
+                    <li>Auto-resume on restart - Never lose progress</li>
+                    <li>Real-time dashboard with live logs</li>
+                    <li>Advanced security & device spoofing</li>
+                    <li>Smart flood protection</li>
+                    <li>24/7 operation support</li>
+                    <li>Customizable delays & settings</li>
+                    <li>Persistent sessions</li>
+                </ul>
+            </div>
+            
+            <p><strong>Start the bot on Telegram to get your personal dashboard link.</strong></p>
+            
+            <div class="credit">
+                <p>⚡ Developed by <a href="https://t.me/NY_BOTS" target="_blank">@NY_BOTS</a></p>
+                <p style="font-size: 0.9em; margin-top: 10px;">Premium Quality • Professional Support</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    '''
+
+@app.route('/dashboard/<token>')
+def dashboard(token):
+    user_id = get_user_from_token(token)
+    if not user_id:
+        return '''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Access Denied</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+                    min-height: 100vh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 20px;
+                }
+                .container {
+                    background: white;
+                    padding: 50px;
+                    border-radius: 20px;
+                    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                    text-align: center;
+                    max-width: 500px;
+                }
+                h1 { color: #ef4444; margin-bottom: 20px; font-size: 2.5em; }
+                p { color: #6b7280; margin: 15px 0; line-height: 1.8; }
+                .emoji { font-size: 4em; margin-bottom: 20px; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="emoji">🔒</div>
+                <h1>Access Denied</h1>
+                <p>Invalid or expired dashboard token.</p>
+                <p>Please generate a new link from the bot.</p>
+            </div>
+        </body>
+        </html>
+        ''', 403
+    
+    html = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Telegram Invite Bot - Dashboard</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta charset="UTF-8">
+        <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+            }
+            
+            .container { max-width: 1400px; margin: 0 auto; }
+            
+            .header {
+                background: white;
+                padding: 30px;
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+                margin-bottom: 25px;
+                text-align: center;
+                position: relative;
+                overflow: hidden;
+                animation: slideDown 0.5s ease-out;
+            }
+            
+            @keyframes slideDown {
+                from { opacity: 0; transform: translateY(-20px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            
+            .header::before {
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                height: 5px;
+                background: linear-gradient(90deg, #667eea, #764ba2, #f093fb);
+                animation: gradientMove 3s ease infinite;
+            }
+            
+            @keyframes gradientMove {
+                0%, 100% { transform: translateX(-50%); }
+                50% { transform: translateX(50%); }
+            }
+            
+            .header h1 {
+                color: #667eea;
+                font-size: 2.8em;
+                margin-bottom: 10px;
+                font-weight: 700;
+            }
+            
+            .header p { color: #6b7280; margin: 10px 0; font-size: 1.1em; }
+            
+            .credit-badge {
+                display: inline-block;
+                padding: 10px 20px;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                color: white;
+                border-radius: 25px;
+                font-weight: 600;
+                margin-top: 15px;
+                text-decoration: none;
+                transition: all 0.3s ease;
+            }
+            
+            .credit-badge:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+            }
+            
+            .status-badge {
+                display: inline-block;
+                padding: 12px 30px;
+                border-radius: 30px;
+                font-weight: 700;
+                font-size: 1.1em;
+                margin-top: 15px;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+            }
+            
+            .status-running {
+                background: linear-gradient(135deg, #10b981, #059669);
+                color: white;
+                animation: pulse 2s infinite;
+                box-shadow: 0 0 30px rgba(16, 185, 129, 0.5);
+            }
+            
+            @keyframes pulse {
+                0%, 100% { opacity: 1; transform: scale(1); }
+                50% { opacity: 0.85; transform: scale(1.05); }
+            }
+            
+            .status-idle {
+                background: linear-gradient(135deg, #6b7280, #4b5563);
+                color: white;
+            }
+            
+            .status-paused {
+                background: linear-gradient(135deg, #f59e0b, #d97706);
+                color: white;
+                animation: pulse 2s infinite;
+            }
+            
+            .info-banner {
+                background: linear-gradient(135deg, #3b82f6, #2563eb);
+                color: white;
+                padding: 20px;
+                border-radius: 15px;
+                margin-bottom: 25px;
+                box-shadow: 0 10px 30px rgba(59, 130, 246, 0.3);
+                animation: fadeIn 0.6s ease-out;
+            }
+            
+            @keyframes fadeIn {
+                from { opacity: 0; }
+                to { opacity: 1; }
+            }
+            
+            .info-banner h3 { margin-bottom: 10px; font-size: 1.2em; }
+            .info-banner p { opacity: 0.9; line-height: 1.6; }
+            
+            .grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                gap: 25px;
+                margin-bottom: 25px;
+            }
+            
+            .stat-card {
+                background: white;
+                padding: 30px;
+                border-radius: 20px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+                text-align: center;
+                transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+                position: relative;
+                overflow: hidden;
+                animation: scaleIn 0.5s ease-out;
+            }
+            
+            @keyframes scaleIn {
+                from { opacity: 0; transform: scale(0.9); }
+                to { opacity: 1; transform: scale(1); }
+            }
+            
+            .stat-card::before {
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                height: 4px;
+                background: linear-gradient(90deg, #667eea, #764ba2);
+                transform: scaleX(0);
+                transition: transform 0.4s ease;
+            }
+            
+            .stat-card:hover {
+                transform: translateY(-10px);
+                box-shadow: 0 20px 50px rgba(0,0,0,0.15);
+            }
+            
+            .stat-card:hover::before { transform: scaleX(1); }
+            
+            .stat-card h3 {
+                color: #6b7280;
+                font-size: 0.95em;
+                margin-bottom: 15px;
+                text-transform: uppercase;
+                letter-spacing: 1.5px;
+                font-weight: 600;
+            }
+            
+            .stat-card .value {
+                font-size: 3em;
+                font-weight: 800;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                background-clip: text;
+                margin: 10px 0;
+            }
+            
+            .stat-card .icon { font-size: 2.5em; margin-bottom: 15px; opacity: 0.8; }
+            .stat-card .subtext { color: #9ca3af; font-size: 0.85em; margin-top: 10px; }
+            
+            .logs-container {
+                background: #1e293b;
+                border-radius: 20px;
+                padding: 25px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                max-height: 650px;
+                overflow-y: auto;
+            }
+            
+            .logs-container::-webkit-scrollbar { width: 10px; }
+            .logs-container::-webkit-scrollbar-track { background: #0f172a; border-radius: 10px; }
+            .logs-container::-webkit-scrollbar-thumb { 
+                background: linear-gradient(135deg, #667eea, #764ba2); 
+                border-radius: 10px; 
+            }
+            
+            .logs-header {
+                color: #cbd5e1;
+                font-size: 1.3em;
+                margin-bottom: 20px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding-bottom: 15px;
+                border-bottom: 2px solid #334155;
+                font-weight: 600;
+            }
+            
+            .log-entry {
+                font-family: 'Courier New', monospace;
+                padding: 12px 15px;
+                margin: 8px 0;
+                border-radius: 10px;
+                font-size: 0.9em;
+                animation: slideIn 0.4s ease-out;
+                line-height: 1.6;
+                border-left: 4px solid transparent;
+            }
+            
+            @keyframes slideIn {
+                from { opacity: 0; transform: translateX(-20px); }
+                to { opacity: 1; transform: translateX(0); }
+            }
+            
+            .log-INFO {
+                background: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%);
+                color: #dbeafe;
+                border-left-color: #3b82f6;
+            }
+            
+            .log-WARNING {
+                background: linear-gradient(135deg, #b45309 0%, #92400e 100%);
+                color: #fef3c7;
+                border-left-color: #f59e0b;
+            }
+            
+            .log-ERROR {
+                background: linear-gradient(135deg, #991b1b 0%, #7f1d1d 100%);
+                color: #fee2e2;
+                border-left-color: #ef4444;
+            }
+            
+            .log-time { color: #cbd5e1; margin-right: 12px; font-weight: 700; }
+            
+            .button-group { display: flex; gap: 10px; }
+            
+            .btn {
+                border: none;
+                padding: 12px 24px;
+                border-radius: 10px;
+                cursor: pointer;
+                font-size: 0.95em;
+                font-weight: 600;
+                transition: all 0.3s ease;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+            
+            .clear-btn {
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+                color: white;
+            }
+            
+            .clear-btn:hover {
+                background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(239, 68, 68, 0.4);
+            }
+            
+            .auto-scroll-btn {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+            }
+            
+            .auto-scroll-btn:hover {
+                background: linear-gradient(135deg, #5568d3 0%, #6b3f94 100%);
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+            }
+            
+            .auto-scroll-btn.off {
+                background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);
+            }
+            
+            .footer {
+                background: white;
+                padding: 20px;
+                border-radius: 15px;
+                text-align: center;
+                margin-top: 25px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            }
+            
+            .footer p { color: #6b7280; margin: 5px 0; }
+            
+            @media (max-width: 768px) {
+                .header h1 { font-size: 2em; }
+                .grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; }
+                .stat-card .value { font-size: 2em; }
+                .logs-container { max-height: 400px; }
+                .button-group { flex-direction: column; }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🚀 Telegram Invite Bot</h1>
+                <p>Premium Performance Dashboard</p>
+                <a href="https://t.me/NY_BOTS" target="_blank" class="credit-badge">
+                    ⚡ Developed by @NY_BOTS
+                </a>
+                <br>
+                <span id="status-badge" class="status-badge status-idle">● IDLE</span>
+            </div>
+
+            <div class="info-banner">
+                <h3>🛡️ Smart Member Management System</h3>
+                <p>
+                    ✅ MongoDB-powered duplicate detection<br>
+                    🔄 Auto-resume on restart • 24/7 operation<br>
+                    🔐 Advanced security & flood protection<br>
+                    💡 Safe delays (4-10s) for account protection
+                </p>
+            </div>
+
+            <div class="grid">
+                <div class="stat-card">
+                    <div class="icon">⚡</div>
+                    <h3>Active Tasks</h3>
+                    <div class="value" id="active-tasks">0</div>
+                    <div class="subtext">Running operations</div>
+                </div>
+                <div class="stat-card">
+                    <div class="icon">✅</div>
+                    <h3>Total Invited</h3>
+                    <div class="value" id="total-invited">0</div>
+                    <div class="subtext">Successfully added</div>
+                </div>
+                <div class="stat-card">
+                    <div class="icon">📨</div>
+                    <h3>DMs Sent</h3>
+                    <div class="value" id="total-dms">0</div>
+                    <div class="subtext">Messages delivered</div>
+                </div>
+                <div class="stat-card">
+                    <div class="icon">❌</div>
+                    <h3>Failed</h3>
+                    <div class="value" id="total-failed">0</div>
+                    <div class="subtext">Normal failures</div>
+                </div>
+            </div>
+
+            <div class="logs-container">
+                <div class="logs-header">
+                    <span>📊 Live Activity Logs</span>
+                    <div class="button-group">
+                        <button class="btn auto-scroll-btn" id="auto-scroll-btn" onclick="toggleAutoScroll()">
+                            Auto-Scroll: ON
+                        </button>
+                        <button class="btn clear-btn" onclick="clearLogs()">Clear Logs</button>
+                    </div>
+                </div>
+                <div id="logs"></div>
+            </div>
+
+            <div class="footer">
+                <p><strong>🔐 Security:</strong> Private dashboard • Never share this URL</p>
+                <p>⚡ Powered by <a href="https://t.me/NY_BOTS" target="_blank" style="color: #667eea; text-decoration: none;"><strong>@NY_BOTS</strong></a></p>
+            </div>
+        </div>
+
+        <script>
+            let logs = [];
+            const maxLogs = 500;
+            let autoScroll = true;
+
+            function toggleAutoScroll() {
+                autoScroll = !autoScroll;
+                const btn = document.getElementById('auto-scroll-btn');
+                btn.textContent = autoScroll ? 'Auto-Scroll: ON' : 'Auto-Scroll: OFF';
+                btn.classList.toggle('off', !autoScroll);
+            }
+
+            function updateStatus() {
+                const token = window.location.pathname.split('/')[2];
+                fetch(`/api/status/${token}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        document.getElementById('active-tasks').textContent = data.active_tasks;
+                        document.getElementById('total-invited').textContent = data.total_invited;
+                        document.getElementById('total-dms').textContent = data.total_dms;
+                        document.getElementById('total-failed').textContent = data.total_failed;
+
+                        const badge = document.getElementById('status-badge');
+                        if (data.is_paused) {
+                            badge.className = 'status-badge status-paused';
+                            badge.textContent = `⏸ PAUSED`;
+                        } else if (data.active_tasks > 0) {
+                            badge.className = 'status-badge status-running';
+                            badge.textContent = `● RUNNING (${data.active_tasks})`;
+                        } else {
+                            badge.className = 'status-badge status-idle';
+                            badge.textContent = '● IDLE';
+                        }
+                    })
+                    .catch(err => console.error('Status update error:', err));
+            }
+
+            function streamLogs() {
+                const token = window.location.pathname.split('/')[2];
+                const eventSource = new EventSource(`/api/logs/stream/${token}`);
+                const logsDiv = document.getElementById('logs');
+
+                eventSource.onmessage = function(event) {
+                    try {
+                        const log = JSON.parse(event.data);
+                        logs.push(log);
+                        
+                        if (logs.length > maxLogs) {
+                            logs.shift();
+                        }
+
+                        const logEntry = document.createElement('div');
+                        logEntry.className = `log-entry log-${log.level}`;
+                        logEntry.innerHTML = `<span class="log-time">[${log.time}]</span>${log.message}`;
+                        
+                        logsDiv.appendChild(logEntry);
+                        
+                        if (autoScroll) {
+                            logsDiv.scrollTop = logsDiv.scrollHeight;
+                        }
+
+                        if (logsDiv.children.length > maxLogs) {
+                            logsDiv.removeChild(logsDiv.firstChild);
+                        }
+                    } catch (e) {
+                        console.error('Log parse error:', e);
+                    }
+                };
+
+                eventSource.onerror = function() {
+                    console.log('EventSource error, reconnecting in 3s...');
+                    eventSource.close();
+                    setTimeout(() => streamLogs(), 3000);
+                };
+            }
+
+            function clearLogs() {
+                document.getElementById('logs').innerHTML = '';
+                logs = [];
+            }
+
+            updateStatus();
+            streamLogs();
+            setInterval(updateStatus, 2000);
+        </script>
+    </body>
+    </html>
+    '''
+    return html
+
+@app.route('/api/status/<token>')
+def api_status(token):
+    user_id = get_user_from_token(token)
+    if not user_id:
+        abort(403)
+    
+    user_data = get_user_from_db(user_id)
+    total_invited = len(user_data.get('added_members', [])) if user_data else 0
+    total_dms = user_data.get('total_dms_sent', 0) if user_data else 0
+    total_failed = user_data.get('total_failed', 0) if user_data else 0
+    active = 1 if user_id in ACTIVE_TASKS else 0
+    is_paused = ACTIVE_TASKS.get(user_id, {}).get('paused', False) if user_id in ACTIVE_TASKS else False
+
+    return jsonify({
+        'active_tasks': active,
+        'total_invited': total_invited,
+        'total_dms': total_dms,
+        'total_failed': total_failed,
+        'is_paused': is_paused
+    })
+
+@app.route('/api/logs/stream/<token>')
+def logs_stream(token):
+    user_id = get_user_from_token(token)
+    if not user_id:
+        abort(403)
+    
+    def generate():
+        if user_id not in USER_LOG_QUEUES:
+            USER_LOG_QUEUES[user_id] = Queue(maxsize=500)
+        
+        while True:
+            try:
+                log = USER_LOG_QUEUES[user_id].get(timeout=30)
+                yield f"data: {json.dumps(log)}\n\n"
+            except queue.Empty:
+                yield f"data: {json.dumps({'time': datetime.now().strftime('%H:%M:%S'), 'level': 'INFO', 'message': 'Waiting for activity...'})}\n\n"
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                break
+    
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'healthy',
+        'active_tasks': len(ACTIVE_TASKS),
+        'mongodb_connected': True,
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/api/stats')
+def api_stats():
+    """Global statistics endpoint"""
+    try:
+        total_users = users_collection.count_documents({})
+        total_tasks = tasks_collection.count_documents({})
+        active_tasks = len(ACTIVE_TASKS)
+        
+        # Calculate total invites across all users
+        total_invites = 0
+        for user in users_collection.find({}):
+            total_invites += len(user.get('added_members', []))
+        
+        return jsonify({
+            'total_users': total_users,
+            'total_tasks': total_tasks,
+            'active_tasks': active_tasks,
+            'total_invites': total_invites,
+            'uptime': 'Running'
+        })
+    except Exception as e:
+        logger.error(f"Stats error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # ==================== MAIN FUNCTION ====================
 def main():
@@ -2201,10 +3339,7 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler('start', start),
-            MessageHandler(filters.Regex('^🚀 Start Task$'), run_command),
-            MessageHandler(filters.Regex('^⚙️ Settings$'), settings_command), # Added entry point for settings
-            MessageHandler(filters.Regex('^⏱ Change Delays$'), change_delays), # Added entry point for delays
-            MessageHandler(filters.Regex('^⏳ Change Pause Time$'), change_pause_time) # Added entry point for pause time
+            MessageHandler(filters.Regex('^🚀 Start Task$'), run_command)
         ],
         states={
             API_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, api_id)],
@@ -2215,10 +3350,6 @@ def main():
             SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, source_group)],
             TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, target_group)],
             INVITE_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, invite_link)],
-            SETTINGS_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyboard)],
-            SET_MIN_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_min_delay)],
-            SET_MAX_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_max_delay)],
-            SET_PAUSE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_pause_time)],
         },
         fallbacks=[
             MessageHandler(filters.Regex('^❌ Cancel$'), cancel),
@@ -2226,21 +3357,73 @@ def main():
         ],
     )
     
+    # Settings conversation handler
+    settings_conv_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex('^⚙️ Settings$'), settings_menu)
+        ],
+        states={
+            SETTINGS_MENU: [
+                MessageHandler(filters.Regex('^⏱ Change Delays$'), change_delays),
+                MessageHandler(filters.Regex('^⏸ Pause Duration$'), change_pause_duration),
+                MessageHandler(filters.Regex('^📊 View Settings$'), view_settings),
+                MessageHandler(filters.Regex('^🔙 Back to Main$'), cancel)
+            ],
+            SETTINGS_MIN_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_min_delay)],
+            SETTINGS_MAX_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_max_delay)],
+            SETTINGS_PAUSE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_pause_time)],
+        },
+        fallbacks=[
+            MessageHandler(filters.Regex('^❌ Cancel$'), cancel),
+            MessageHandler(filters.Regex('^🔙 Back to Main$'), cancel),
+            CommandHandler('cancel', cancel)
+        ],
+    )
+    
     # Add handlers
     application.add_handler(conv_handler)
-    
-    # General command and message handlers
+    application.add_handler(settings_conv_handler)
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('stats', stats_command))
+    application.add_handler(CommandHandler('clear', clear_command))
+    application.add_handler(CommandHandler('pause', pause_command))
+    application.add_handler(CommandHandler('resume', resume_task))
+    application.add_handler(CommandHandler('stop', stop_command))
+    application.add_handler(CommandHandler('reset', reset_session))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyboard))
     
-    # Run bot in a separate thread
-    bot_thread = Thread(target=lambda: application.run_polling(poll_interval=1.0))
-    bot_thread.start()
-
-    logger.info("🤖 Telegram Bot Polling Started.")
-
-    # Run Flask app for dashboard/health check
-    logger.info(f"🌐 Flask Server Starting on port {PORT}")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    # Start Flask in a separate thread
+    def run_flask():
+        app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True, use_reloader=False)
+    
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    logger.info("=" * 60)
+    logger.info("🚀 TELEGRAM INVITE BOT STARTED SUCCESSFULLY!")
+    logger.info("=" * 60)
+    logger.info(f"🌐 Dashboard URL: {APP_URL}")
+    logger.info(f"🔌 Port: {PORT}")
+    logger.info(f"📊 MongoDB: Connected")
+    logger.info(f"🤖 Bot Token: {BOT_TOKEN[:10]}...")
+    logger.info(f"⚡ Developed by: @NY_BOTS")
+    logger.info("=" * 60)
+    
+    # Start bot polling
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("\n" + "=" * 60)
+        logger.info("👋 Bot stopped by user (Ctrl+C)")
+        logger.info("=" * 60)
+    except Exception as e:
+        logger.error("=" * 60)
+        logger.error(f"❌ FATAL ERROR: {e}")
+        logger.error("=" * 60)
+        import traceback
+        traceback.print_exc()
+        raise
