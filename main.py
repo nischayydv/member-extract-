@@ -102,7 +102,7 @@ queue_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
 logging.getLogger().addHandler(queue_handler)
 
 # ==================== STATES ====================
-API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK, SETTINGS_MENU, EDIT_MIN_DELAY, EDIT_MAX_DELAY, EDIT_PAUSE_TIME, ADMIN_PANEL, GRANT_PREMIUM, REVOKE_PREMIUM, BROADCAST_MSG = range(16)
+API_ID, API_HASH, PHONE, OTP_CODE, TWO_FA_PASSWORD, SOURCE, TARGET, INVITE_LINK, SETTINGS_MENU, EDIT_MIN_DELAY, EDIT_MAX_DELAY, EDIT_PAUSE_TIME, ADMIN_PANEL, GRANT_PREMIUM, REVOKE_PREMIUM, BROADCAST_MSG, EDIT_DM_MESSAGE, EDIT_SCRAPING_MODE = range(18)
 
 # ==================== ACTIVE TASKS ====================
 ACTIVE_TASKS = {}
@@ -131,6 +131,7 @@ def get_admin_keyboard():
 def get_settings_keyboard():
     keyboard = [
         [KeyboardButton('⏱ Delay Settings'), KeyboardButton('⏸ Pause Duration')],
+        [KeyboardButton('📨 DM Settings'), KeyboardButton('🔍 Scraping Mode')],
         [KeyboardButton('🔄 Reset Session'), KeyboardButton('📊 View Settings')],
         [KeyboardButton('🔙 Back to Main')]
     ]
@@ -194,8 +195,57 @@ def get_user_from_token(token):
     user = users_collection.find_one({'dashboard_token': token})
     if user:
         return user['user_id']
+    return         return EDIT_PAUSE_TIME
+
+async def edit_dm_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == '❌ Cancel':
+        await update.message.reply_text("❌ Cancelled", reply_markup=get_settings_keyboard())
+        return SETTINGS_MENU
     
-    return EDIT_PAUSE_TIME
+    user_id = str(update.effective_user.id)
+    new_message = update.message.text.strip()
+    
+    if len(new_message) > 200:
+        await update.message.reply_text(
+            "❌ Message too long!\n\nMaximum 200 characters allowed.\n\nTry again:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return EDIT_DM_MESSAGE
+    
+    if len(new_message) < 3:
+        await update.message.reply_text(
+            "❌ Message too short!\n\nMinimum 3 characters required.\n\nTry again:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return EDIT_DM_MESSAGE
+    
+    users_collection.update_one(
+        {'user_id': user_id},
+        {'$set': {
+            'settings.dm_message': new_message,
+            'updated_at': datetime.now()
+        }}
+    )
+    
+    is_running = user_id in ACTIVE_TASKS
+    
+    await update.message.reply_text(
+        f"✅ <b>DM Message Updated!</b>\n\n"
+        f"New Message: <code>{new_message}</code>\n\n"
+        f"{'💡 Will be used on next batch!' if is_running else '✅ Ready to use!'}",
+        parse_mode='HTML',
+        reply_markup=get_settings_keyboard()
+    )
+    
+    if is_running:
+        log_to_user(user_id, 'INFO', f"✏️ DM message updated: {new_message[:50]}")
+    
+    await log_to_admin(context.bot, "✏️ DM Message Changed", user_id, {
+        'new_message': new_message,
+        'task_running': is_running
+    })
+    
+    return SETTINGS_MENU
 
 # ==================== PREMIUM COMMANDS ====================
 async def premium_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -712,7 +762,160 @@ def log_to_user(user_id, level, message):
     elif level == 'ERROR':
         user_logger.error(message)
 
-async def log_to_admin(bot, message, user_id=None, data=None):
+async def log_to_admin(bot, message, user_id=    elif text == '📨 DM Settings':
+        user_data = get_user_from_db(user_id)
+        settings = user_data.get('settings', {}) if user_data else {}
+        send_dm = bool(settings.get('send_dm', False))
+        dm_message = settings.get('dm_message', 'Hi! 👋')
+        
+        is_running = user_id in ACTIVE_TASKS
+        
+        keyboard = [
+            [KeyboardButton('✅ Enable DM'), KeyboardButton('❌ Disable DM')],
+            [KeyboardButton('✏️ Edit DM Message')],
+            [KeyboardButton('🔙 Back to Settings')]
+        ]
+        
+        await update.message.reply_text(
+            f"📨 <b>DM Settings</b>\n\n"
+            f"Current Status: <b>{'✅ Enabled' if send_dm else '❌ Disabled'}</b>\n"
+            f"Current Message: <code>{dm_message}</code>\n\n"
+            f"💡 DM will be sent to members after successful invite\n"
+            f"⚠️ Too many DMs may trigger spam detection!\n"
+            f"{'💡 Changes will apply on next batch!' if is_running else ''}",
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return SETTINGS_MENU
+    
+    elif text == '✅ Enable DM':
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'settings.send_dm': True, 'updated_at': datetime.now()}}
+        )
+        await update.message.reply_text(
+            "✅ <b>DM Enabled!</b>\n\nMessages will be sent to members after invite.",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        log_to_user(user_id, 'INFO', "✅ DM feature enabled")
+        return SETTINGS_MENU
+    
+    elif text == '❌ Disable DM':
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'settings.send_dm': False, 'updated_at': datetime.now()}}
+        )
+        await update.message.reply_text(
+            "❌ <b>DM Disabled!</b>\n\nNo messages will be sent to members.",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        log_to_user(user_id, 'INFO', "❌ DM feature disabled")
+        return SETTINGS_MENU
+    
+    elif text == '✏️ Edit DM Message':
+        await update.message.reply_text(
+            "✏️ <b>Edit DM Message</b>\n\n"
+            "Send the new message you want to send to invited members.\n\n"
+            "💡 Keep it short and friendly!\n"
+            "⚠️ Avoid spam-like messages\n\n"
+            "<code>Example: Hi! Welcome to our community! 👋</code>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return EDIT_DM_MESSAGE
+    
+    elif text == '🔍 Scraping Mode':
+        user_data = get_user_from_db(user_id)
+        settings = user_data.get('settings', {}) if user_data else {}
+        scraping_mode = settings.get('scraping_mode', 'recent')
+        
+        is_running = user_id in ACTIVE_TASKS
+        
+        keyboard = [
+            [KeyboardButton('🔥 Recent Mode'), KeyboardButton('⚡ Active Mode')],
+            [KeyboardButton('🌐 All Mode')],
+            [KeyboardButton('🔙 Back to Settings')]
+        ]
+        
+        mode_desc = {
+            'recent': '🔥 Recent: Fast scraping (200 recent members)',
+            'active': '⚡ Active: Smart scraping (500 active members)',
+            'all': '🌐 All: Complete scraping (all members, slower)'
+        }
+        
+        await update.message.reply_text(
+            f"🔍 <b>Scraping Mode Settings</b>\n\n"
+            f"Current Mode: <b>{scraping_mode.upper()}</b>\n"
+            f"{mode_desc.get(scraping_mode, '')}\n\n"
+            f"📊 <b>Available Modes:</b>\n\n"
+            f"🔥 <b>Recent Mode</b>\n"
+            f"• Fast & efficient\n"
+            f"• Scrapes 200 recent members\n"
+            f"• Best for active groups\n\n"
+            f"⚡ <b>Active Mode</b>\n"
+            f"• Smart filtering\n"
+            f"• Scrapes 500 active members\n"
+            f"• Filters recently active users\n\n"
+            f"🌐 <b>All Mode</b>\n"
+            f"• Complete scraping\n"
+            f"• Gets all group members\n"
+            f"• Slower but comprehensive\n\n"
+            f"{'💡 Changes will apply on next batch!' if is_running else ''}",
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return SETTINGS_MENU
+    
+    elif text == '🔥 Recent Mode':
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'settings.scraping_mode': 'recent', 'updated_at': datetime.now()}}
+        )
+        await update.message.reply_text(
+            "🔥 <b>Recent Mode Activated!</b>\n\n"
+            "✅ Fast scraping enabled\n"
+            "📊 Will scrape 200 recent members per batch",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        log_to_user(user_id, 'INFO', "🔥 Scraping mode: RECENT")
+        return SETTINGS_MENU
+    
+    elif text == '⚡ Active Mode':
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'settings.scraping_mode': 'active', 'updated_at': datetime.now()}}
+        )
+        await update.message.reply_text(
+            "⚡ <b>Active Mode Activated!</b>\n\n"
+            "✅ Smart filtering enabled\n"
+            "📊 Will scrape 500 active members per batch",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        log_to_user(user_id, 'INFO', "⚡ Scraping mode: ACTIVE")
+        return SETTINGS_MENU
+    
+    elif text == '🌐 All Mode':
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'settings.scraping_mode': 'all', 'updated_at': datetime.now()}}
+        )
+        await update.message.reply_text(
+            "🌐 <b>All Mode Activated!</b>\n\n"
+            "✅ Complete scraping enabled\n"
+            "📊 Will scrape all members (slower)\n"
+            "⚠️ This mode takes longer!",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        log_to_user(user_id, 'INFO', "🌐 Scraping mode: ALL")
+        return SETTINGS_MENU
+    
+    elif text == '🔙 Back to Settings':
+        return await settings_command(update, context), data=None):
     try:
         log_text = f"📊 <b>Bot Activity Log</b>\n\n"
         log_text += f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -815,9 +1018,14 @@ async def invite_task(user_id, bot, chat_id):
         min_delay = float(settings.get('min_delay', 4.0))
         max_delay = float(settings.get('max_delay', 10.0))
         pause_time = int(settings.get('pause_time', 600))
+        send_dm = bool(settings.get('send_dm', False))
+        dm_message = settings.get('dm_message', 'Hi! 👋')
+        scraping_mode = settings.get('scraping_mode', 'recent')
+        skip_bots = bool(settings.get('skip_bots', True))
+        skip_deleted = bool(settings.get('skip_deleted', True))
         
         # Log the settings being used
-        log_to_user(user_id, 'INFO', f"⚙️ Using settings: Delay {min_delay}-{max_delay}s, Pause {pause_time//60}min")
+        log_to_user(user_id, 'INFO', f"⚙️ Using settings: Delay {min_delay}-{max_delay}s, Pause {pause_time//60}min, DM: {'ON' if send_dm else 'OFF'}, Mode: {scraping_mode}")
 
         ACTIVE_TASKS[str(user_id)] = {
             'running': True,
@@ -860,9 +1068,11 @@ async def invite_task(user_id, bot, chat_id):
             f"📱 Device: {device_info['device_model']}\n"
             f"⏱ Delay: {min_delay}-{max_delay}s\n"
             f"⏸ Pause: {pause_time//60}min on flood\n"
+            f"📨 DM: {'✅ Enabled' if send_dm else '❌ Disabled'}\n"
+            f"🔍 Scraping: {scraping_mode.upper()}\n"
             f"📍 Source: {source_group}\n"
             f"🎯 Target: {target_group}\n\n"
-            f"💡 Settings are loaded from database!\n"
+            f"💡 Settings loaded from database!\n"
             f"Use keyboard buttons to control!",
             parse_mode='HTML'
         )
@@ -970,6 +1180,7 @@ async def invite_task(user_id, bot, chat_id):
             chat_id,
             f"🎉 <b>TASK COMPLETED!</b>\n\n"
             f"✅ Total Invited: {final_stats['invited_count']}\n"
+            f"📨 DMs Sent: {final_stats['dm_count']}\n"
             f"❌ Total Failed: {final_stats['failed_count']}\n"
             f"⏱ Total Time: {int(elapsed//60)}m {int(elapsed%60)}s\n"
             f"📊 Members Added: {len(get_user_from_db(user_id).get('added_members', []))}\n\n"
@@ -1427,10 +1638,13 @@ async def invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'max_delay': 10.0,
             'pause_time': 600,
             'max_invites': 0,
+            'send_dm': False,
+            'dm_message': 'Hi! 👋',
+            'scraping_mode': 'recent',  # recent, active, all
             'filter_online': False,
             'filter_verified': False,
-            'skip_dm_on_fail': False,
-            'custom_message': None
+            'skip_bots': True,
+            'skip_deleted': True
         },
         'added_members': [],
         'created_at': datetime.now()
@@ -1761,6 +1975,9 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     min_delay = float(settings.get('min_delay', 4.0))
     max_delay = float(settings.get('max_delay', 10.0))
     pause_time = int(settings.get('pause_time', 600))
+    send_dm = bool(settings.get('send_dm', False))
+    dm_message = settings.get('dm_message', 'Hi! 👋')
+    scraping_mode = settings.get('scraping_mode', 'recent')
     
     is_running = user_id in ACTIVE_TASKS
     
@@ -1768,6 +1985,9 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ <b>Current Settings</b>\n\n"
         f"⏱ <b>Delay Range:</b> {min_delay}-{max_delay} seconds\n"
         f"⏸ <b>Pause Duration:</b> {pause_time//60} minutes\n"
+        f"📨 <b>Send DM:</b> {'✅ Enabled' if send_dm else '❌ Disabled'}\n"
+        f"💬 <b>DM Message:</b> {dm_message[:30]}...\n" if send_dm else ""
+        f"🔍 <b>Scraping Mode:</b> {scraping_mode.upper()}\n"
         f"📱 <b>Device:</b> {user_data.get('device_info', {}).get('device_model', 'N/A')}\n"
         f"📞 <b>Phone:</b> {user_data.get('phone', 'N/A')}\n"
         f"🔴 <b>Task Status:</b> {'🟢 Running' if is_running else '⚫ Idle'}\n\n"
@@ -2942,6 +3162,7 @@ def main():
             EDIT_MIN_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_min_delay)],
             EDIT_MAX_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_max_delay)],
             EDIT_PAUSE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_pause_time)],
+            EDIT_DM_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_dm_message_handler)],
         },
         fallbacks=[
             MessageHandler(filters.Regex('^❌ Cancel$'), cancel),
