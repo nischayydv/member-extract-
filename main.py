@@ -195,7 +195,8 @@ def get_user_from_token(token):
     user = users_collection.find_one({'dashboard_token': token})
     if user:
         return user['user_id']
-    return         return EDIT_PAUSE_TIME
+    
+    return EDIT_PAUSE_TIME
 
 async def edit_dm_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text == '❌ Cancel':
