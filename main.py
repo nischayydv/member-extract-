@@ -1597,8 +1597,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Use 🔧 Admin Panel to manage bot\n\n"
             "⚡ <i>Bot by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>"
         )
-        keyboard = get_main_keyboard()
-        keyboard.keyboard.append([KeyboardButton('🔧 Admin Panel')])
+        # Create admin keyboard with extra button
+        keyboard = [
+            [KeyboardButton('🚀 Start Task'), KeyboardButton('🔄 Resume Task')],
+            [KeyboardButton('⏸ Pause Task'), KeyboardButton('⏹ Stop Task')],
+            [KeyboardButton('📊 Statistics'), KeyboardButton('🗑 Clear History')],
+            [KeyboardButton('🌐 Dashboard'), KeyboardButton('⚙️ Settings')],
+            [KeyboardButton('💎 Premium Status'), KeyboardButton('❓ Help')],
+            [KeyboardButton('🔧 Admin Panel')]
+        ]
+        reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
     elif premium_status['is_premium']:
         if premium_status['type'] == 'trial':
             welcome_text = (
@@ -1627,7 +1635,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📅 Expires: {premium_status['expires_at'].strftime('%Y-%m-%d')}\n\n"
                 f"⚡ <i>Bot by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>"
             )
-        keyboard = get_main_keyboard()
+        reply_keyboard = get_main_keyboard()
     else:
         welcome_text = (
             "🔥 <b>Welcome to Telegram Invite Bot!</b>\n\n"
@@ -1647,11 +1655,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📞 Contact: @NY_BOTS\n\n"
             "⚡ <i>Bot by</i> <a href='https://t.me/NY_BOTS'>@NY_BOTS</a>"
         )
-        keyboard = get_main_keyboard()
+        reply_keyboard = get_main_keyboard()
     
     await update.message.reply_text(
         welcome_text,
-        reply_markup=keyboard,
+        reply_markup=reply_keyboard,
         parse_mode='HTML',
         disable_web_page_preview=True
     )
