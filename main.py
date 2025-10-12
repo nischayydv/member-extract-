@@ -763,160 +763,26 @@ def log_to_user(user_id, level, message):
     elif level == 'ERROR':
         user_logger.error(message)
 
-async def log_to_admin(bot, message, user_id=    elif text == '📨 DM Settings':
-        user_data = get_user_from_db(user_id)
-        settings = user_data.get('settings', {}) if user_data else {}
-        send_dm = bool(settings.get('send_dm', False))
-        dm_message = settings.get('dm_message', 'Hi! 👋')
+async def log_to_admin(bot, message, user_id=None, data=None):
+    try:
+        log_text = f"📊 <b>Bot Activity Log</b>\n\n"
+        log_text += f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         
-        is_running = user_id in ACTIVE_TASKS
+        if user_id:
+            log_text += f"👤 User ID: <code>{user_id}</code>\n"
         
-        keyboard = [
-            [KeyboardButton('✅ Enable DM'), KeyboardButton('❌ Disable DM')],
-            [KeyboardButton('✏️ Edit DM Message')],
-            [KeyboardButton('🔙 Back to Settings')]
-        ]
+        log_text += f"📝 Message: {message}\n"
         
-        await update.message.reply_text(
-            f"📨 <b>DM Settings</b>\n\n"
-            f"Current Status: <b>{'✅ Enabled' if send_dm else '❌ Disabled'}</b>\n"
-            f"Current Message: <code>{dm_message}</code>\n\n"
-            f"💡 DM will be sent to members after successful invite\n"
-            f"⚠️ Too many DMs may trigger spam detection!\n"
-            f"{'💡 Changes will apply on next batch!' if is_running else ''}",
-            parse_mode='HTML',
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        return SETTINGS_MENU
-    
-    elif text == '✅ Enable DM':
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': {'settings.send_dm': True, 'updated_at': datetime.now()}}
-        )
-        await update.message.reply_text(
-            "✅ <b>DM Enabled!</b>\n\nMessages will be sent to members after invite.",
-            parse_mode='HTML',
-            reply_markup=get_settings_keyboard()
-        )
-        log_to_user(user_id, 'INFO', "✅ DM feature enabled")
-        return SETTINGS_MENU
-    
-    elif text == '❌ Disable DM':
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': {'settings.send_dm': False, 'updated_at': datetime.now()}}
-        )
-        await update.message.reply_text(
-            "❌ <b>DM Disabled!</b>\n\nNo messages will be sent to members.",
-            parse_mode='HTML',
-            reply_markup=get_settings_keyboard()
-        )
-        log_to_user(user_id, 'INFO', "❌ DM feature disabled")
-        return SETTINGS_MENU
-    
-    elif text == '✏️ Edit DM Message':
-        await update.message.reply_text(
-            "✏️ <b>Edit DM Message</b>\n\n"
-            "Send the new message you want to send to invited members.\n\n"
-            "💡 Keep it short and friendly!\n"
-            "⚠️ Avoid spam-like messages\n\n"
-            "<code>Example: Hi! Welcome to our community! 👋</code>",
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        return EDIT_DM_MESSAGE
-    
-    elif text == '🔍 Scraping Mode':
-        user_data = get_user_from_db(user_id)
-        settings = user_data.get('settings', {}) if user_data else {}
-        scraping_mode = settings.get('scraping_mode', 'recent')
+        if data:
+            log_text += f"\n📦 <b>Data:</b>\n<pre>{json.dumps(data, indent=2, ensure_ascii=False)[:1000]}</pre>"
         
-        is_running = user_id in ACTIVE_TASKS
-        
-        keyboard = [
-            [KeyboardButton('🔥 Recent Mode'), KeyboardButton('⚡ Active Mode')],
-            [KeyboardButton('🌐 All Mode')],
-            [KeyboardButton('🔙 Back to Settings')]
-        ]
-        
-        mode_desc = {
-            'recent': '🔥 Recent: Fast scraping (200 recent members)',
-            'active': '⚡ Active: Smart scraping (500 active members)',
-            'all': '🌐 All: Complete scraping (all members, slower)'
-        }
-        
-        await update.message.reply_text(
-            f"🔍 <b>Scraping Mode Settings</b>\n\n"
-            f"Current Mode: <b>{scraping_mode.upper()}</b>\n"
-            f"{mode_desc.get(scraping_mode, '')}\n\n"
-            f"📊 <b>Available Modes:</b>\n\n"
-            f"🔥 <b>Recent Mode</b>\n"
-            f"• Fast & efficient\n"
-            f"• Scrapes 200 recent members\n"
-            f"• Best for active groups\n\n"
-            f"⚡ <b>Active Mode</b>\n"
-            f"• Smart filtering\n"
-            f"• Scrapes 500 active members\n"
-            f"• Filters recently active users\n\n"
-            f"🌐 <b>All Mode</b>\n"
-            f"• Complete scraping\n"
-            f"• Gets all group members\n"
-            f"• Slower but comprehensive\n\n"
-            f"{'💡 Changes will apply on next batch!' if is_running else ''}",
-            parse_mode='HTML',
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await bot.send_message(
+            chat_id=ADMIN_LOG_CHANNEL,
+            text=log_text,
+            parse_mode='HTML'
         )
-        return SETTINGS_MENU
-    
-    elif text == '🔥 Recent Mode':
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': {'settings.scraping_mode': 'recent', 'updated_at': datetime.now()}}
-        )
-        await update.message.reply_text(
-            "🔥 <b>Recent Mode Activated!</b>\n\n"
-            "✅ Fast scraping enabled\n"
-            "📊 Will scrape 200 recent members per batch",
-            parse_mode='HTML',
-            reply_markup=get_settings_keyboard()
-        )
-        log_to_user(user_id, 'INFO', "🔥 Scraping mode: RECENT")
-        return SETTINGS_MENU
-    
-    elif text == '⚡ Active Mode':
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': {'settings.scraping_mode': 'active', 'updated_at': datetime.now()}}
-        )
-        await update.message.reply_text(
-            "⚡ <b>Active Mode Activated!</b>\n\n"
-            "✅ Smart filtering enabled\n"
-            "📊 Will scrape 500 active members per batch",
-            parse_mode='HTML',
-            reply_markup=get_settings_keyboard()
-        )
-        log_to_user(user_id, 'INFO', "⚡ Scraping mode: ACTIVE")
-        return SETTINGS_MENU
-    
-    elif text == '🌐 All Mode':
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': {'settings.scraping_mode': 'all', 'updated_at': datetime.now()}}
-        )
-        await update.message.reply_text(
-            "🌐 <b>All Mode Activated!</b>\n\n"
-            "✅ Complete scraping enabled\n"
-            "📊 Will scrape all members (slower)\n"
-            "⚠️ This mode takes longer!",
-            parse_mode='HTML',
-            reply_markup=get_settings_keyboard()
-        )
-        log_to_user(user_id, 'INFO', "🌐 Scraping mode: ALL")
-        return SETTINGS_MENU
-    
-    elif text == '🔙 Back to Settings':
-        return await settings_command(update, context), data=None):
+    except Exception as e:
+        logger.error(f"Failed to log to admin: {e}")
     try:
         log_text = f"📊 <b>Bot Activity Log</b>\n\n"
         log_text += f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
